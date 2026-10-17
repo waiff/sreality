@@ -51,7 +51,7 @@ except ImportError:  # pragma: no cover — no getrusage outside Unix
     resource = None  # type: ignore[assignment]
 
 from autodedup import indistinguishable, normalize, reconcile, rt_lease
-from autodedup.calibration_cut import CalibrationCut
+from autodedup.calibration_cut import CalibrationCut, decode_payload, encode_payload
 from autodedup.dataset import Image, Listing
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
@@ -2478,19 +2478,36 @@ _CALIBRATIONS: dict[str, tuple[str, Calibration]] = {}
 
 def read_calibration(conn: Any, generation: str = GENERATION
                      ) -> tuple[Sequence[Any], Calibration]:
-    """The generation's calibration row and its calibration, the payload read once a digest."""
+    """The generation's calibration row and its calibration, the payload read once a digest.
+
+    The one reader of `payload_zlib` (E963). The row handed back holds no payload, so a pass
+    does not keep the compressed bytes beside the calibration they decoded to."""
     held = _CALIBRATIONS.get(generation)
     rows = _rows(conn, RT_CALIBRATION_READ_SQL,
                  {"generation": generation, "held": held[0] if held else None})
     if not rows:
         raise SystemExit(f"no calibration for generation {generation!r} — seed it")
-    digest, payload = str(rows[0][1]), rows[0][3]
-    if held is not None and payload is None and held[0] == digest:
-        return rows[0], held[1]
-    calibration = Calibration.from_json(
-        payload if isinstance(payload, dict) else json.loads(payload or "{}"))
+    row = (*rows[0][:3], None, *rows[0][4:])
+    digest, blob = str(rows[0][1]), rows[0][3]
+    if held is not None and blob is None and held[0] == digest:
+        return row, held[1]
+    if blob is None:
+        # A row cut before E963 carries its payload in the retired jsonb column, which nothing
+        # reads: deciding under an empty calibration would stamp decisions nobody took.
+        raise SystemExit(
+            f"the calibration of generation {generation!r} (digest {digest!r}) has no "
+            "payload_zlib — it was cut before E963 (migration 616). Re-seed it under the brake: "
+            "`gh workflow run autodedup.yml -f mode=rt_seed "
+            "-f args=\"settings=<name>,model=<name>,fresh=true\"`.")
+    calibration = decode_payload(bytes(blob))
+    # The stored bytes must decode to the calibration the row names: a drift between the
+    # encoding and the decoding refuses here, before it is memoised under the wrong digest.
+    if calibration.digest() != digest:
+        raise SystemExit(
+            f"the calibration of generation {generation!r} decodes to digest "
+            f"{calibration.digest()!r}, not the row's {digest!r} — refusing to decide under it")
     _CALIBRATIONS[generation] = (digest, calibration)
-    return rows[0], calibration
+    return row, calibration
 
 
 def recut_due(recut: Any, built_at: Any) -> bool:
@@ -2705,10 +2722,10 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
         _exec_many(conn, RT_PHASH_POP_WRITE_SQL, [
             {"phash": phash, "n_listings": population[phash]}
             for phash in order[start:start + POP_CHUNK]])
-    payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
+    # E963: zlib over the canonical JSON in a bytea, so no jsonb ceiling (256 MiB) binds a cut.
     _exec(conn, RT_CALIBRATION_WRITE_SQL, {
         "generation": generation, "digest": calibration.digest(),
-        "n_listings": calibration.n_listings, "payload": payload, "artifact_url": None,
+        "n_listings": calibration.n_listings, "payload_zlib": encode_payload(calibration),
         "settings": json.dumps(settings.to_dict(), sort_keys=True),
         "model_version": model_version})
     return {"digest": calibration.digest(), "n_listings": calibration.n_listings,
@@ -3030,8 +3047,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
-            raise SystemExit("autodedup realtime store absent — migration 539, 596 or 604 "
-                             "not applied")
+            raise SystemExit("autodedup realtime store absent — migration 539, 596, 604 or "
+                             "616 not applied")
         if not _rows(conn, RT_CALIBRATION_PRESENT_SQL, {"generation": generation}):
             return {"skipped": "unseeded",
                     "reason": (f"generation {generation!r} has no calibration — seed it with "
@@ -3090,19 +3107,19 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             return {"skipped": STOPPING, "reason": "the worker is shutting down",
                     "predecessor_released": predecessor, "spent_usd": 0.0}
         row, calibration = read_calibration(conn, generation)
-        settings, model = pass_config(row[5], row[6], generation)
+        settings, model = pass_config(row[4], row[5], generation)
         # E944: read again under the lease — a re-cut stopped while this tick waited for it has
         # put its row back since `control` was read.
         recut = lane_settings(conn, [recut_key(generation)]).get(recut_key(generation))
         cutting = isinstance(recut, Mapping) and bool(recut.get("cutting"))
-        recut = recut_died(conn, generation, holder, recut, row[7])
+        recut = recut_died(conn, generation, holder, recut, row[6])
         died = recut["last"] if cutting else None
         # The scope as it now stands: the last cut's count, or the store's fingerprinted adverts
         # when the scope has grown since.
         scope_listings = max(int(row[2] or 0),
                              int((storage.get("rows") or {}).get("rt_fp") or 0))
-        if (recut_unfit(bootstrap, scope_listings, recut, row[7]) is None
-                and recut_due(recut, row[7]) and _recut_age_ok(recut, row[7])):
+        if (recut_unfit(bootstrap, scope_listings, recut, row[6]) is None
+                and recut_due(recut, row[6]) and _recut_age_ok(recut, row[6])):
             # E944: the tick a pass found the population drifted re-cuts instead of passing.
             return {"skipped": "recut",
                     "reason": "the pHash population fell below the floor: the calibration is "
@@ -3110,7 +3127,7 @@ def run_incremental(conn_factory: Callable[[], Any], *,
                     "recut": run_recut(conn, settings, model.version, generation, holder=holder,
                                        before=str(row[1]), recut=recut, deadline=deadline,
                                        stopping=stopping),
-                    "calibration": {"built_age_days": age_days(row[7])},
+                    "calibration": {"built_age_days": age_days(row[6])},
                     "generation": generation, "predecessor_released": predecessor,
                     "claim_cap": cap, "spent_usd": 0.0, **pass_memory()}
         store = SqlStore(conn, generation, calibration_digest=calibration.digest(),
@@ -3298,10 +3315,10 @@ def run_incremental(conn_factory: Callable[[], Any], *,
         if (not stopped and owns_the_lane() and coverage is not None
                 and coverage < COVERAGE_FLOOR
                 and facts.images_with_phash >= RECUT_MIN_IMAGES
-                and not recut_due(recut, row[7]) and _recut_age_ok(recut, row[7])):
-            unfit = recut_unfit(bootstrap, scope_listings, recut, row[7])
+                and not recut_due(recut, row[6]) and _recut_age_ok(recut, row[6])):
+            unfit = recut_unfit(bootstrap, scope_listings, recut, row[6])
             value = {**(recut if isinstance(recut, Mapping) else {}),
-                     "due": None if unfit else _iso(row[7])}
+                     "due": None if unfit else _iso(row[6])}
             if unfit:
                 at = datetime.now(timezone.utc).isoformat()
                 summary["recut"] = value["last"] = {
@@ -3335,8 +3352,8 @@ def run_incremental(conn_factory: Callable[[], Any], *,
             "released_this_pass": result.released if result is not None else 0,
             "redecided": result.redecided if result is not None else 0,
         }
-        summary["calibration"] = {"digest": calibration.digest(), "built_at": _iso(row[7]),
-                                  "built_age_days": age_days(row[7])}
+        summary["calibration"] = {"digest": calibration.digest(), "built_at": _iso(row[6]),
+                                  "built_age_days": age_days(row[6])}
         # E943: the reject ledger's engine key; a pass after it moved decides every reject anew.
         summary["engine_digest"] = store.engine_digest
         summary["retention"] = {"store_floor": settings.store_floor,
@@ -3422,8 +3439,8 @@ def run_rt_seed(
     try:
         present = _rows(conn, RT_STORE_PRESENT_SQL)
         if not present or not present[0][0]:
-            raise SystemExit("autodedup realtime store absent — migration 539, 596 or 604 "
-                             "not applied")
+            raise SystemExit("autodedup realtime store absent — migration 539, 596, 604 or "
+                             "616 not applied")
         existing = _rows(conn, RT_CALIBRATION_PRESENT_SQL, {"generation": generation})
         if existing and not fresh:
             raise SystemExit(

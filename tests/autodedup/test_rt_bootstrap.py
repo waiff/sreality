@@ -44,7 +44,7 @@ from autodedup.incremental_lane import (
 )
 from autodedup import incremental_sql as S
 from autodedup.incremental_scope import Scope, ScopeBlock
-from tests.autodedup.fake_pg import FakePg
+from tests.autodedup.fake_pg import EMPTY_PAYLOAD, FakePg
 from tests.autodedup.lane_world import seed as seed_public
 
 GEN = "rt"
@@ -93,8 +93,8 @@ def _populated(db: FakePg) -> FakePg:
         db.reject_ledger[(generation, 11, 13)] = {
             "dd_lo": "a", "dd_hi": "b", "calibration_digest": "d", "feature_version": 1,
             "decided_at": db.now}
-        db.calibration[generation] = {"digest": "d", "n_listings": 2, "payload": {},
-                                      "artifact_url": None, "settings": {},
+        db.calibration[generation] = {"digest": "d", "n_listings": 2, "payload_zlib": EMPTY_PAYLOAD,
+                                      "settings": {},
                                       "model_version": "w6_gold"}
     for name in RESET_CURSORS:
         db.cursors[name] = {"last_listing_id": 7, "last_snapshot_id": 7, "watermark": None}

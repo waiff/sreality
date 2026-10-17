@@ -348,7 +348,7 @@ def test_an_absent_store_skips_every_tick_with_one_warning(
     assert first["errors"] == 0 and first["ran"] is False
     assert second["reason"] == "store_absent"
     assert conn.closed
-    assert sum("store (migrations 539/540/596/604) is absent" in r.message
+    assert sum("store (migrations 539/540/596/604/616) is absent" in r.message
                for r in caplog.records) == 1
 
 

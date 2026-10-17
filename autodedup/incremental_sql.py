@@ -45,7 +45,10 @@ select to_regclass('autodedup.fp_key')         is not null
    and to_regclass('autodedup.rt_reject_ledger') is not null
    and exists (select 1 from pg_attribute
                 where attrelid = to_regclass('autodedup.rt_fp')
-                  and attname = 'dd' and not attisdropped) as present
+                  and attname = 'dd' and not attisdropped)
+   and exists (select 1 from pg_attribute
+                where attrelid = to_regclass('autodedup.rt_calibration')
+                  and attname = 'payload_zlib' and not attisdropped) as present
 """
 
 # A pass is one transaction (E75) and a statement that runs away is a lease held past its TTL,
@@ -1298,13 +1301,15 @@ select c.generation, c.digest, c.built_at
  where c.generation = %(generation)s::text
 """
 
-# E944: `held` is the digest of the calibration the caller already holds; the payload (5.7 MB
-# of text at 39.5k adverts) comes back NULL while it is still the stored one, so a pass reads it
+# E963: the payload is `payload_zlib` — the canonical JSON (`calibration_cut.encode_payload`)
+# zlib-compressed in a bytea, under bytea's 1 GB where a jsonb value stops at 256 MiB of binary.
+# `read_calibration` is its one reader. E944: `held` is the digest of the calibration the caller
+# already holds; the payload comes back NULL while it is still the stored one, so a pass reads it
 # once per digest. NULL `held` reads it always.
 RT_CALIBRATION_READ_SQL = """
 select c.generation, c.digest, c.n_listings,
-       case when c.digest = %(held)s::text then null else c.payload end as payload,
-       c.artifact_url, c.settings, c.model_version, c.built_at
+       case when c.digest = %(held)s::text then null else c.payload_zlib end as payload_zlib,
+       c.settings, c.model_version, c.built_at
   from autodedup.rt_calibration c
  where c.generation = %(generation)s::text
 """
@@ -1327,15 +1332,14 @@ select distinct i.phash
 """
 
 RT_CALIBRATION_WRITE_SQL = """
-insert into autodedup.rt_calibration (generation, digest, n_listings, payload, artifact_url,
-                                      settings, model_version, built_at)
-values (%(generation)s::text, %(digest)s::text, %(n_listings)s::integer, %(payload)s::jsonb,
-        %(artifact_url)s::text, %(settings)s::jsonb, %(model_version)s::text, now())
+insert into autodedup.rt_calibration (generation, digest, n_listings, payload_zlib, settings,
+                                      model_version, built_at)
+values (%(generation)s::text, %(digest)s::text, %(n_listings)s::integer,
+        %(payload_zlib)s::bytea, %(settings)s::jsonb, %(model_version)s::text, now())
 on conflict (generation) do update set
     digest        = excluded.digest,
     n_listings    = excluded.n_listings,
-    payload       = excluded.payload,
-    artifact_url  = excluded.artifact_url,
+    payload_zlib  = excluded.payload_zlib,
     settings      = excluded.settings,
     model_version = excluded.model_version,
     built_at      = now()
@@ -1579,6 +1583,14 @@ select count(*)::bigint
                      from autodedup.rt_fp f
                     where f.generation = %(generation)s::text
                       and f.listing_id = s.listing_id)
+"""
+
+# The generation's scorer, never its payload: a reader that decides nothing (`rt_equivalence`)
+# leaves the payload to `read_calibration` (E963).
+RT_CALIBRATION_SCORER_SQL = """
+select c.settings, c.model_version
+  from autodedup.rt_calibration c
+ where c.generation = %(generation)s::text
 """
 
 # ------------------------------------------------------------------ live equivalence (E99)

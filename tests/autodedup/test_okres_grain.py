@@ -43,7 +43,7 @@ from autodedup.incremental_scope import (
 from autodedup import incremental_lane
 from scraper import realtime_worker as rw
 from tests.autodedup import lane_world
-from tests.autodedup.fake_pg import FakePg, _in_scope
+from tests.autodedup.fake_pg import EMPTY_PAYLOAD, FakePg, _in_scope
 from tests.autodedup.test_legacy_retire import LiveStreamDb, _factory, _intact_pair
 from tests.autodedup.test_one_lane import RT, LaneDb
 from tests.autodedup.test_apply import _pair_group
@@ -141,7 +141,7 @@ def test_a_town_or_a_quarter_beside_its_own_okres_is_refused() -> None:
 
 def test_a_pass_over_a_town_beside_its_okres_refuses_before_the_lease() -> None:
     db = _register(FakePg())
-    db.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload": {}, "artifact_url": None,
+    db.calibration[GEN] = {"digest": "d", "n_listings": 3, "payload_zlib": EMPTY_PAYLOAD,
                            "settings": {}, "model_version": "hand_v1"}
     db.settings[scope_setting_key(GEN)] = [{"grain": "okres", "code": BEROUN_OKRES},
                                            {"grain": "obec", "code": BEROUN}]

@@ -74,8 +74,25 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   trial and c18), ~4-10 kB an advert at its peak by block size (bounded at 12 kB) against ~58 kB,
   so the 323,128-ad seed projects ~1.9-2.3 GiB on the 16 GiB runner (it would have been
   OOM-killed at ~18 GiB) and the memory bound admits 699,050 ads (`MAX_SCHEMA_MB` binds first,
-  above ~470k); its payload, ~80-120 MB of jsonb, sits under the 256 MB limit. Owed: `Calibration.build` is now only the tests' oracle — fold it
+  above ~470k). Its payload is no longer jsonb (E963, below). Owed: `Calibration.build` is now only the tests' oracle — fold it
   into the stream with the next change that moves the engine digest.
+- **S7 — every other region (operator, 2026-10-17: after Prague and Středočeský kraj, "expand
+  beyond to all other regions when possible"), ~872k located ads.** Prerequisites, measured:
+  **E963 (done 2026-10-17):** the calibration payload is zlib over its canonical JSON in a bytea
+  (migration 616), not one jsonb value — jsonb stops at 268,435,455 B of BINARY, ~1.57× the text,
+  so ~252k ads in small blocks (E962's "~400k" read the text) and the nation's ~591 MB of text
+  (~929 MB binary) could not be written; stored it is ~164 MB (the binding bytea limit is the hex
+  READ, ~537 MB compressed, ~2.87M ads), the digest unchanged (trial and c18 proven). Ships with a
+  re-seed: 616 applied under the brake, merge, `rt_seed fresh=true` (or E964's widening seed)
+  before the brake comes off — a row cut before 616 is refused, not read. **After the first E963
+  seed commits, never a bare revert: brake, revert, re-seed** (the retired `payload` still holds
+  the 10-16 calibration). Owed, scheduled right after that sitting is verified: the DROP of
+  `payload` / `artifact_url` (destructive: the operator's OK + a backup; the old reader then
+  fails loudly). Still binding at the nation's size: `MAX_SCHEMA_MB` 10,000 (~470k ads,
+  E940/E962), the cut's memory bound 699,050 ads at 12 kB (E962); the worker's calibration is
+  ~2.9 GB through every pass (resident ~1.6 + `context_for`'s copy ~1.2) and ~4.5–5 GB at a
+  digest change — under its 22.9 GB (one row a block of `block_token_df` would let the read
+  parse a block at a time; not built).
 - **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
   walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at

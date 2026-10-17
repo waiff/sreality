@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from autodedup.calibration_cut import decode_payload
 from autodedup.incremental import WorkItem
 from autodedup.incremental_lane import (
     CURSOR_ENTER,
@@ -32,7 +33,7 @@ from autodedup.incremental_lane import (
 )
 from autodedup.incremental_scope import Scope, ScopeBlock
 from autodedup.incremental_sql import RT_SCOPE_BLOCK_SQL
-from tests.autodedup.fake_pg import LEDGER_KEY, FakePg
+from tests.autodedup.fake_pg import EMPTY_DIGEST, EMPTY_PAYLOAD, LEDGER_KEY, FakePg
 from tests.autodedup.lane_world import seed
 
 GEN = "rt"
@@ -74,8 +75,8 @@ def _registry(db: FakePg) -> FakePg:
 
 
 def _seeded(db: FakePg, generation: str = GEN, scope: Any = None) -> FakePg:
-    db.calibration[generation] = {"digest": "d", "n_listings": 3, "payload": {},
-                                  "artifact_url": None, "settings": {},
+    db.calibration[generation] = {"digest": EMPTY_DIGEST, "n_listings": 3,
+                                  "payload_zlib": EMPTY_PAYLOAD, "settings": {},
                                   "model_version": "hand_v1"}
     db.settings[scope_setting_key(generation)] = (
         scope if scope is not None else [{"grain": "obec", "code": 563510}])
@@ -100,7 +101,8 @@ def test_rt_seed_cuts_the_generation_from_the_database(tmp_path) -> None:
     seed(conn)
     out = run_rt_seed(lambda: conn, {**SCORER, SCOPE_SETTING: "obec:563510"}, tmp_path)
     assert conn.calibration[GEN]["digest"] == out["calibration"]["digest"]
-    assert conn.calibration[GEN]["artifact_url"] is None
+    stored = decode_payload(conn.calibration[GEN]["payload_zlib"])
+    assert stored.digest() == out["calibration"]["digest"], "the stored payload is the cut's"
     assert out["calibration"]["scope_listings"] == len(conn.listings)
     assert conn.phash_pop, "the population is measured, not copied from an export"
     assert conn.settings[scope_setting_key(GEN)] == [{"grain": "obec", "code": 563510}]

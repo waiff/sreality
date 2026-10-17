@@ -19,7 +19,7 @@ from autodedup.harness import model_of_version
 from autodedup.incremental_lane import scope_setting_key
 from autodedup.rt_equivalence import EQUIVALENCE_FILE, SCORE_ONLY_MAX, run_equivalence
 from autodedup.score_lane import families_of_bitmask
-from tests.autodedup.fake_pg import LEDGER_KEY, FakePg
+from tests.autodedup.fake_pg import EMPTY_PAYLOAD, LEDGER_KEY, FakePg
 
 LIVE = "rt"
 BATCH = "g6"
@@ -75,8 +75,8 @@ def _fp_row() -> dict:
 def _db(ids: range = range(1, 5)) -> FakePg:
     """A live generation seeded on a two-block scope, with `ids` inside it."""
     db = FakePg(now=NOW)
-    db.calibration[LIVE] = {"digest": "d", "n_listings": len(ids), "payload": {},
-                            "artifact_url": None, "settings": {"store_floor": 0.02},
+    db.calibration[LIVE] = {"digest": "d", "n_listings": len(ids), "payload_zlib": EMPTY_PAYLOAD,
+                            "settings": {"store_floor": 0.02},
                             "model_version": "w6_gold"}
     db.settings[scope_setting_key(LIVE)] = [{"grain": "obec", "code": 563510}]
     for listing_id in ids:

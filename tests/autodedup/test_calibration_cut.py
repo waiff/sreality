@@ -13,6 +13,7 @@ from __future__ import annotations
 import gc
 import json
 import random
+import zlib
 from dataclasses import fields, replace
 from typing import Any
 
@@ -251,8 +252,9 @@ def test_the_lane_cut_is_the_same_calibration_at_every_chunk(world, tmp_path) ->
     for chunk in (1, 2, 4):
         assert cut_calibration(world, Settings(), "m", GENERATION,
                                chunk=chunk)["digest"] == seeded["digest"]
-        written = json.loads(world.calibration[GENERATION]["payload"])
-        assert {**written, "built_at": None} == {**json.loads(seeded["payload"]), "built_at": None}
+        written = json.loads(zlib.decompress(world.calibration[GENERATION]["payload_zlib"]))
+        first = json.loads(zlib.decompress(seeded["payload_zlib"]))
+        assert {**written, "built_at": None} == {**first, "built_at": None}
 
 
 def test_the_lane_cut_holds_one_chunk_of_facts_and_fingerprints(world, tmp_path,

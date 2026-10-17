@@ -58,7 +58,7 @@ from autodedup.incremental_lane import (
 from autodedup.incremental_scope import ScopeError, resolve_scope
 from autodedup.incremental_sql import (
     ENTER_SLICE,
-    RT_CALIBRATION_READ_SQL,
+    RT_CALIBRATION_SCORER_SQL,
     RT_EQUIV_CLOCK_FACTS_SQL,
     RT_EQUIV_HOLDS_SQL,
     RT_EQUIV_MEMBERS_SQL,
@@ -636,16 +636,16 @@ def run_equivalence(
 
     conn = conn_factory()
     try:
-        rows = _rows(conn, RT_CALIBRATION_READ_SQL, {"generation": generation, "held": None})
+        rows = _rows(conn, RT_CALIBRATION_SCORER_SQL, {"generation": generation})
         if not rows:
             raise SystemExit(
                 f"generation {generation!r} has no frozen calibration — this mode compares the "
                 "store a SEEDED generation holds, and an unseeded one holds nothing")
-        settings_blob = rows[0][5]
+        settings_blob = rows[0][0]
         live_settings = (settings_blob if isinstance(settings_blob, dict)
                          else json.loads(settings_blob or "{}"))
         store_floor = float(live_settings.get("store_floor") or DEFAULT_STORE_FLOOR)
-        live_model = None if rows[0][6] is None else str(rows[0][6])
+        live_model = None if rows[0][1] is None else str(rows[0][1])
         control = lane_settings(conn, [scope_setting_key(generation)])
         try:
             scope = resolve_scope(None, read_scope_setting(control, generation))

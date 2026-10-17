@@ -11,6 +11,7 @@ scorer nobody chose, and a re-cluster spelled per component.
 from __future__ import annotations
 
 import json
+import zlib
 from datetime import timedelta
 from typing import Any
 
@@ -377,7 +378,7 @@ def test_the_calibration_read_once_a_digest_decides_as_a_fresh_read_every_pass(
         "the kept calibration is read again only on the tick after its digest moved")
     assert {row["calibration_digest"] for row in hot.reject_ledger.values()} == {digests[-1]}, (
         "the last pass keyed its rejects on the digest the re-cut before it moved to")
-    stored = json.loads(hot.calibration[GENERATION]["payload"])
+    stored = json.loads(zlib.decompress(hot.calibration[GENERATION]["payload_zlib"]))
     assert kept[GENERATION][0] == digests[-1]
     assert kept[GENERATION][1].to_json() == Calibration.from_json(stored).to_json(), (
         "nothing writes into the calibration a pass was handed")

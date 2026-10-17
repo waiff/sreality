@@ -40,7 +40,7 @@ from autodedup.rt_equivalence import (
 )
 from autodedup.features import WindowRule
 from autodedup.incremental_lane import scope_setting_key
-from tests.autodedup.fake_pg import FakePg
+from tests.autodedup.fake_pg import EMPTY_PAYLOAD, FakePg
 from tests.autodedup.test_rt_equivalence import (
     BATCH,
     EXPORTED,
@@ -452,8 +452,7 @@ def _replay_world(g1: dict[str, Any], *, resolved_after_cut: bool = True) -> Fak
     now = run_day.replace(hour=15, minute=52)
     arrived = {19054614, 19054616, 19055674}
     db = FakePg(now=now)
-    db.calibration[LIVE] = {"digest": "d", "n_listings": 0, "payload": {},
-                            "artifact_url": None,
+    db.calibration[LIVE] = {"digest": "d", "n_listings": 0, "payload_zlib": EMPTY_PAYLOAD,
                             "settings": {"store_floor": 0.02, "live_window_from_sighting": True},
                             "model_version": MODEL}
     db.settings[scope_setting_key(LIVE)] = [{"grain": "obec", "code": 563510}]

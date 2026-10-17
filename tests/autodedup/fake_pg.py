@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import json
 import re
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Mapping, Sequence
 
 from autodedup import export_sql as E
 from autodedup import incremental_sql as S
 from autodedup import apply_sql as A
+from autodedup.calibration_cut import decode_payload
 from autodedup.decide import CERTIFICATES
 from autodedup.indistinguishable import FEATURE_SLOTS
 from autodedup.score_sql import CLUSTER_CONFLICT_INSERT_SQL
@@ -35,6 +37,15 @@ from autodedup.score_lane import CLUSTER_INSERT_SQL, CLUSTER_MEMBER_INSERT_SQL
 # The reject ledger's key a test store is built with when the test is not about the ledger
 # (E943: `SqlStore` takes both, so the lookup and the write read one source).
 LEDGER_KEY: dict[str, str] = {"calibration_digest": "c", "engine_digest": "e"}
+
+# The stored form (E963) of the empty calibration a test seeds a generation with when the test is
+# not about the calibration, and the digest its row must name for the reader to take it.
+EMPTY_PAYLOAD: bytes = zlib.compress(b"{}")
+EMPTY_DIGEST: str = decode_payload(EMPTY_PAYLOAD).digest()
+
+
+# PostgreSQL's ceiling on one varlena value (`MaxAllocSize`, Appendix K's "field size: 1 GB").
+BYTEA_MAX = (1 << 30) - 1
 
 
 def _jsonb(value: Any) -> Any:
@@ -915,10 +926,16 @@ def _dispatch(db: FakePg, sql: str, p: Mapping[str, Any]) -> list[tuple]:  # noq
         held = p["held"]
         return [] if row is None else [(gen, row["digest"], row["n_listings"],
                                         None if held is not None and held == row["digest"]
-                                        else _jsonb(row["payload"]), row["artifact_url"],
+                                        else row.get("payload_zlib"),
                                         _jsonb(row["settings"]), row["model_version"],
                                         row.get("built_at", db.now))]
+    if sql == S.RT_CALIBRATION_SCORER_SQL:
+        row = db.calibration.get(gen)
+        return [] if row is None else [(_jsonb(row["settings"]), row["model_version"])]
     if sql == S.RT_CALIBRATION_WRITE_SQL:
+        blob = p["payload_zlib"]
+        # A bytea is one varlena: at most 1 GB, where a jsonb value stops at 256 MiB (E963).
+        assert isinstance(blob, bytes) and len(blob) <= BYTEA_MAX, type(blob)
         db.calibration[gen] = {**p, "built_at": db.now}
         return []
 
