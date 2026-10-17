@@ -291,23 +291,26 @@ def test_the_seed_lists_a_block_over_the_page_whole_and_cuts_over_all_of_it(
     assert out["enter_scan"]["page_of"] == {}, "nothing left mid-cycle"
     assert _pages(db) == {BLOCK: {"after": 0, "page": 0, "of": 5}}
     assert sorted(lid for _g, block, lid in db.scope_ids if block == BLOCK) == sorted(db.listings)
-    assert out["seed_memory"] == {"scope_listings": 9, "cut_peak_mb": 0.5,
+    assert out["seed_memory"] == {"scope_listings": 9, "cut_peak_mb": 0.1,
                                   "seed_memory_mb": lane.SEED_MEMORY_MB}
     assert out["peak_rss_mb"] is None or out["peak_rss_mb"] > 0, "the process's own peak"
 
 
 def test_a_seed_whose_cut_would_pass_the_runners_memory_refuses_before_the_cut(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The cut holds ~56 kB an advert at its peak (E940's review, the trial cohort): half the
-    16 GiB runner is ~149,800 adverts, and the 323,128 of the Prague + kraj re-seed would peak
-    at ~17.3 GiB — an OOM kill ~40-60 min in that strands the lease for five hours. Refused
-    right after the walk, inside the transaction: nothing written, the cut never started."""
-    assert int(lane.SEED_MEMORY_MB * 1_048_576 // lane.CUT_PEAK_BYTES_PER_LISTING) == 149_796
+    """The streamed cut holds ~12 kB an advert at its peak (E962: 4 kB on cohort 18's large
+    blocks, ~8-10 kB on a kraj of villages; the whole cut E940 bounded held ~56 kB): half the
+    16 GiB runner is 699,050 adverts, so the 323,128 of the Prague + kraj re-seed pass at
+    ~3.7 GiB where they would have peaked at ~17.3 GiB — an OOM kill that strands the lease for
+    five hours. A scope past the bound is refused right after the walk, inside the
+    transaction: nothing written, the cut never started."""
+    assert int(lane.SEED_MEMORY_MB * 1_048_576 // lane.CUT_PEAK_BYTES_PER_LISTING) == 699_050
+    assert lane.seed_memory(323_128)["cut_peak_mb"] == 3786.7
     with pytest.raises(SystemExit, match="SEED_MEMORY_MB 8,192"):
-        lane.seed_memory(323_128)
+        lane.seed_memory(699_051)
     monkeypatch.setattr(lane, "CUT_PEAK_BYTES_PER_LISTING", 1 << 30)
     db = lane_world.world()
-    with pytest.raises(SystemExit, match=r"the 9 adverts the walk listed .*\(E962\)"):
+    with pytest.raises(SystemExit, match=r"\(streamed, E962\).* the 9 adverts the walk listed"):
         lane_world.seed_lane(db, tmp_path)
     assert not db.calibration and not db.phash_pop and not db.scope_ids
     assert S.RT_CALIBRATION_WRITE_SQL not in db.statements, "the cut never started"

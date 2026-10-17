@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from autodedup import export_sql as E
 from autodedup import incremental_sql as S
@@ -216,6 +216,9 @@ class _Cursor:
 
     def fetchall(self) -> list[tuple]:
         return list(self.rows)
+
+    def __iter__(self) -> Iterator[tuple]:
+        return iter(list(self.rows))
 
     def executemany(self, sql: str, seq: Sequence[Mapping[str, Any]]) -> None:
         for params in seq:

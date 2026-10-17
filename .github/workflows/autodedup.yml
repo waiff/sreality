@@ -218,8 +218,8 @@ name: "AUTODEDUP: engine lane"
 #             generation (`rt`) from the database (A10, E912): walks every block of the scope
 #             (`rt_scope`, else the row the last seed wrote, else the trial blocks) to its end,
 #             a page a statement and under no daily cap (E940), refuses before the cut a
-#             scope over MAX_SCHEMA_MB or one whose cut would pass SEED_MEMORY_MB (~150k
-#             adverts on this 16 GiB runner until E962 streams the cut), cuts the
+#             scope over MAX_SCHEMA_MB or one whose cut would pass SEED_MEMORY_MB (the cut
+#             streams, E962: ~12 kB an advert, 699,050 on this 16 GiB runner), cuts the
 #             calibration's cohort statistics and the pHash population over what those blocks
 #             hold - read through the lane's own fact reader, and the population is the
 #             export's aggregate over public.images - starts the cursors at TODAY and opens

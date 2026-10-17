@@ -25,6 +25,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from autodedup import evaluate as evaluation
 from autodedup import revocation, seals
+from autodedup.calibration_cut import CalibrationCut
 from autodedup.dataset import (
     CATALOG_POP_MIN,
     UNASSIGNED_BLOCK,
@@ -385,11 +386,13 @@ def _drain(store: MemoryStore, facts: CohortFacts, work: Schedule, settings: Set
 
 def calibrated(dataset: Dataset, settings: Settings
                ) -> tuple[dict[int, Fingerprint], Calibration]:
-    """The lane's calibration core (`cut_calibration`: fingerprints off the facts, then
-    `Calibration.build`) over the whole cohort."""
+    """The lane's calibration core (`cut_calibration`: fingerprints off the facts, folded into
+    E962's `CalibrationCut`) over the whole cohort, in one fold."""
     fps = {i: build_fingerprint(listing, images, settings)
            for i, (listing, images) in CohortFacts(dataset).facts(sorted(dataset.listings)).items()}
-    return fps, Calibration.build(fps, dataset.listings, settings)
+    cut = CalibrationCut(settings)
+    cut.fold(fps, dataset.listings)
+    return fps, cut.build()
 
 
 def run(

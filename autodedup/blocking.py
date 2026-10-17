@@ -65,6 +65,60 @@ def probes_town_key(fp: Fingerprint) -> bool:
     return not (fp.obec_kod in SPLIT_CITY_OBEC_KODS and fp.cast_obce_kod is not None)
 
 
+def decile_cuts(prices: list[float]) -> list[float]:
+    """K3's nine decile cuts over one (cat_group, category_type) cohort's prices, which it
+    sorts in place."""
+    prices.sort()
+    n = len(prices)
+    return [prices[min(n - 1, (n * step) // _DECILES)] for step in range(1, _DECILES)]
+
+
+def decile_of(price: float | None, cuts: list[float] | None) -> int | None:
+    """0..9 against a cohort's cuts; None without a price or without cuts."""
+    if price is None or not cuts:
+        return None
+    decile = 0
+    for cut in cuts:
+        if float(price) < cut:
+            break
+        decile += 1
+    return min(decile, _DECILES - 1)
+
+
+def posting_keys(fp: Fingerprint, settings: Settings, decile: Any) -> list[tuple[str, Any]]:
+    """The keys a listing is POSTED under — exact band — with `decile` as the broker key's
+    price decile. `BlockIndex.index_keys` hands in the decile; E962's streamed calibration cut
+    hands in the price itself and maps it once every price is in (`calibration_cut`)."""
+    out: list[tuple[str, Any]] = []
+    if fp.obec_kod is not None and fp.street_key and fp.house_number:
+        out.append(("addr", (fp.obec_kod, fp.street_key, fp.house_number)))
+    for band_no, band_val, _phash in fp.anchor_bands:
+        out.append(("phash", (band_no, band_val)))
+    if fp.has_text:
+        for band_no, band_val in fp.desc_bands:
+            out.append(("text", (band_no, band_val)))
+    if fp.broker_key:
+        out.append(("broker", (fp.broker_key, fp.cat_group, fp.category_type, decile)))
+    if fp.block_key and fp.disposition:
+        out.append(("attr_dispo", (fp.block_key, fp.cat_group, fp.category_type,
+                                   fp.disposition)))
+    if fp.block_key and fp.area_band is not None:
+        out.append(("attr_area", (fp.block_key, fp.cat_group, fp.category_type, fp.area_band)))
+    if fp.country_status == FOREIGN_STATUS and fp.area_band is not None:
+        out.append(("foreign", (fp.country_status, fp.cat_group, fp.category_type,
+                                fp.area_band)))
+    # E300: path C's C1 — town + disposition + area band. An advert with no area states
+    # nothing the key could bound; the disposition may be unknown and then keys as such.
+    # E936: an ad that does not probe the town key keys the same at its quarter.
+    if settings.attr_probe_town_grain and fp.area_band is not None:
+        composite = (fp.cat_group, fp.category_type, fp.disposition, fp.area_band)
+        if fp.obec_kod is not None:
+            out.append((TOWN_PROBE, (fp.obec_kod, *composite)))
+        if not probes_town_key(fp):
+            out.append((QUARTER_PROBE, (fp.block_key, *composite)))
+    return out
+
+
 class BlockIndex:
     """Builds the probe posting lists over a set of fingerprints, then answers lookups."""
 
@@ -109,62 +163,20 @@ class BlockIndex:
             if fp.price is not None:
                 groups.setdefault((fp.cat_group, fp.category_type), []).append(float(fp.price))
         for key, prices in groups.items():
-            prices.sort()
-            n = len(prices)
-            self.price_cuts[key] = [
-                prices[min(n - 1, (n * step) // _DECILES)] for step in range(1, _DECILES)
-            ]
+            self.price_cuts[key] = decile_cuts(prices)
 
     def price_decile(self, fp: Fingerprint) -> int | None:
         """0..9 within the listing's (cat_group, category_type) cohort; None without a price,
         and None for a cohort this index never saw — an unknown decile, not the cheapest one."""
         if not self._keys_ready:
             raise RuntimeError("BlockIndex.price_decile before finalize")
-        if fp.price is None:
-            return None
-        cuts = self.price_cuts.get((fp.cat_group, fp.category_type))
-        if not cuts:
-            return None
-        decile = 0
-        for cut in cuts:
-            if float(fp.price) < cut:
-                break
-            decile += 1
-        return min(decile, _DECILES - 1)
+        return decile_of(fp.price, self.price_cuts.get((fp.cat_group, fp.category_type)))
 
     def index_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
         """The keys this listing is POSTED under — exact band, exact decile."""
         if not self._keys_ready:
             raise RuntimeError("BlockIndex.index_keys before finalize")
-        out: list[tuple[str, Any]] = []
-        if fp.obec_kod is not None and fp.street_key and fp.house_number:
-            out.append(("addr", (fp.obec_kod, fp.street_key, fp.house_number)))
-        for band_no, band_val, _phash in fp.anchor_bands:
-            out.append(("phash", (band_no, band_val)))
-        if fp.has_text:
-            for band_no, band_val in fp.desc_bands:
-                out.append(("text", (band_no, band_val)))
-        if fp.broker_key:
-            out.append(("broker", (fp.broker_key, fp.cat_group, fp.category_type,
-                                   self.price_decile(fp))))
-        if fp.block_key and fp.disposition:
-            out.append(("attr_dispo", (fp.block_key, fp.cat_group, fp.category_type,
-                                       fp.disposition)))
-        if fp.block_key and fp.area_band is not None:
-            out.append(("attr_area", (fp.block_key, fp.cat_group, fp.category_type, fp.area_band)))
-        if fp.country_status == FOREIGN_STATUS and fp.area_band is not None:
-            out.append(("foreign", (fp.country_status, fp.cat_group, fp.category_type,
-                                    fp.area_band)))
-        # E300: path C's C1 — town + disposition + area band. An advert with no area states
-        # nothing the key could bound; the disposition may be unknown and then keys as such.
-        # E936: an ad that does not probe the town key keys the same at its quarter.
-        if self.settings.attr_probe_town_grain and fp.area_band is not None:
-            composite = (fp.cat_group, fp.category_type, fp.disposition, fp.area_band)
-            if fp.obec_kod is not None:
-                out.append((TOWN_PROBE, (fp.obec_kod, *composite)))
-            if not probes_town_key(fp):
-                out.append((QUARTER_PROBE, (fp.block_key, *composite)))
-        return out
+        return posting_keys(fp, self.settings, self.price_decile(fp) if fp.broker_key else None)
 
     def probe_keys(self, fp: Fingerprint) -> list[tuple[str, Any]]:
         """The keys this listing LOOKS UP — the ±1 neighbourhood on band and decile."""

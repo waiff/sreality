@@ -51,6 +51,7 @@ except ImportError:  # pragma: no cover — no getrusage outside Unix
     resource = None  # type: ignore[assignment]
 
 from autodedup import indistinguishable, normalize, reconcile, rt_lease
+from autodedup.calibration_cut import CalibrationCut
 from autodedup.dataset import Image, Listing
 from autodedup.export import (
     DEFAULT_CLIP_MODEL,
@@ -496,14 +497,24 @@ BUILD_BYTES_PER_LISTING: int = 20 * 1024
 # its index) at 7.08 hashes an advert, ~1.1 kB; an upper bound, since a hash already held costs
 # nothing.
 CUT_BYTES_PER_LISTING: int = 1100
-# What the cut HOLDS for one advert at its peak — every scope advert's facts and fingerprint
-# until the calibration is built: ~38 kB held, ~56 kB at the peak, measured on the trial cohort
-# (the review of E940). The seed runs on GitHub's ubuntu-latest, 16 GiB, and a cut past it is
-# OOM-killed ~40-60 min in, stranding `rt_lease` for SEED_LEASE_TTL_S (the lease is taken before
-# the transaction and SIGKILL runs no release). So right after its walk, before the cut, the seed
-# refuses a scope whose peak would pass HALF the runner — the rule a widened scope's gate holds
-# the worker to (E939) — 8,192 MiB / 56 kB = ~149,800 adverts. E962 (a streamed cut) raises it.
-CUT_PEAK_BYTES_PER_LISTING: int = 56 * 1024
+# What the cut HOLDS for one advert at its peak. Until E962 it kept every scope advert's facts
+# and fingerprint until the calibration was built (~41 kB held, ~58 kB at the peak, cohort 18);
+# it now folds each chunk and drops it (`calibration_cut`), so an advert costs its counts and
+# its share of the pHash population. The largest count is `block_token_df`, keyed per (obec,
+# cast_obce) block: a vocabulary saturates inside its block, not across blocks, so the cost
+# follows how many adverts share a block. Cohort 18 (17,458 adverts, w31; 74 blocks, 90 % of
+# its adverts in blocks of 200 or more): 10.4 token entries an advert, ~4 kB of RSS. Re-blocked
+# to kraj 27's distribution (3,334 blocks; 28 % of rows in blocks of 10-49, 32 % in 50-199; the
+# review of E962): 43.9 entries, 8.06 kB of RSS and 678 B of payload an advert; a seed of mostly
+# villages ~9-10 kB all in. Plus the population (120 B a hash at its peak, 7.08 hashes an
+# advert: 0.85 kB), libpq's copy of its rows and the payload's two serialisations: 12 kB with
+# headroom. The seed runs on GitHub's ubuntu-latest, 16 GiB, and a cut past it is OOM-killed,
+# stranding `rt_lease` for SEED_LEASE_TTL_S (the lease is taken before the transaction and
+# SIGKILL runs no release). So right after its walk, before the cut, the seed refuses a scope
+# whose peak would pass HALF the runner — the rule a widened scope's gate holds the worker to
+# (E939) — 8,192 MiB / 12 kB = 699,050 adverts (E940's whole cut: 56 kB, ~149,800), though
+# MAX_SCHEMA_MB binds first, above ~470k. The 323,128 of the re-seed: ~3.7 GiB.
+CUT_PEAK_BYTES_PER_LISTING: int = 12 * 1024
 SEED_MEMORY_MB: float = 8192.0
 # How many `phash_pop` rows one `executemany` carries. The trial cohort's 41,791 hashes are
 # 9 chunks; the number is the score lane's, for the same reason (bound-parameter size).
@@ -1145,8 +1156,8 @@ class SqlFacts:
         # WRITE the table: the calibration cut (A10) measures the scope's hashes first and
         # builds the fingerprints it is cut from on exactly those counts. The pass never
         # passes this — its population is the table's or unknown (E91).
-        self.population = None if population is None else {
-            int(key): int(value) for key, value in population.items()}
+        # Held as handed, never copied (E962: the cut's is ~2.3M hashes at the re-seed).
+        self.population = population
         self.reads = 0
         self.statements = 0
         # The population readout, for the pass summary: how many phash-bearing images this pass
@@ -2601,20 +2612,34 @@ def run_recut(conn: Any, settings: Settings, model_version: str | None, generati
 
 
 def seed_memory(scope_listings: int, memory_mb: float = SEED_MEMORY_MB) -> dict[str, Any]:
-    """What the seed's calibration cut will hold at its peak (E940), refused over SEED_MEMORY_MB
-    before the cut starts: an OOM kill mid-cut strands `rt_lease` for SEED_LEASE_TTL_S."""
+    """What the seed's calibration cut will hold at its peak (E940; streamed since E962), refused
+    over SEED_MEMORY_MB before the cut starts: an OOM kill mid-cut strands `rt_lease` for
+    SEED_LEASE_TTL_S."""
     peak_mb = max(int(scope_listings), 0) * CUT_PEAK_BYTES_PER_LISTING / 1_048_576.0
     report = {"scope_listings": int(scope_listings), "cut_peak_mb": round(peak_mb, 1),
               "seed_memory_mb": float(memory_mb)}
     if peak_mb > float(memory_mb):
         raise SystemExit(
-            f"rt_seed refused: the calibration cut holds ~{CUT_PEAK_BYTES_PER_LISTING // 1024} kB "
-            f"an advert at its peak, so the {int(scope_listings):,} adverts the walk listed "
-            f"would peak at ~{peak_mb:,.0f} MiB, over SEED_MEMORY_MB {float(memory_mb):,.0f} "
-            "(half the runner's 16 GiB): the runner would kill the seed mid-cut and strand "
-            f"autodedup.rt_lease for {SEED_LEASE_TTL_S:,} s. Narrow rt_scope until the cut "
-            "streams (E962). Nothing was written.")
+            f"rt_seed refused: the calibration cut (streamed, E962) holds "
+            f"~{CUT_PEAK_BYTES_PER_LISTING // 1024} kB an advert at its peak, so the "
+            f"{int(scope_listings):,} adverts the walk listed would peak at ~{peak_mb:,.0f} MiB, "
+            f"over SEED_MEMORY_MB {float(memory_mb):,.0f} (half the runner's 16 GiB): the "
+            "runner would kill the seed mid-cut and strand autodedup.rt_lease for "
+            f"{SEED_LEASE_TTL_S:,} s. Narrow rt_scope. Nothing was written.")
     return report
+
+
+def _population(conn: Any, hashes: list[int]) -> dict[int, int]:
+    """E91's population of `hashes` (sorted): ONE statement, because `public.images` has no
+    index on `phash` (D8) and a statement a slice would be a sequential scan a slice. Its rows
+    are read off the cursor one at a time rather than fetched into a list first (E962: ~2.3M
+    rows for the 323k-advert re-seed, ~280 MB of tuples next to the dict they fill); libpq
+    still holds the whole result while they are read, ~64-72 B a row (~150 MB at 2.3M)."""
+    if not hashes:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(COHORT_PHASH_POP_SQL, {"hashes": hashes})
+        return {int(row[0]): int(row[1]) for row in cur}
 
 
 def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
@@ -2636,7 +2661,10 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
     build and the writes keep that much of it (E944)."""
     clock = time.perf_counter()
     read_by = None if deadline is None else deadline - reserve_s
-    ids = [int(row[0]) for row in _rows(conn, RT_CUT_SCOPE_IDS_SQL, {"generation": generation})]
+    # Sorted here as well as by the statement: the stream folds its slices in ascending id
+    # (`CalibrationCut.fold`), the order the oracle adds them in.
+    ids = sorted(int(row[0]) for row in _rows(conn, RT_CUT_SCOPE_IDS_SQL,
+                                              {"generation": generation}))
     if not ids:
         raise CalibrationRefusal(
             f"the scope snapshot of generation {generation!r} holds no listing — nothing to "
@@ -2647,27 +2675,36 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
             _cut_bound(conn, read_by, stopping)
         hashes |= {int(row[0]) for row in _rows(conn, RT_CUT_HASHES_SQL,
                                                 {"ids": ids[start:start + chunk]})}
+    n_hashes = len(hashes)
     _cut_bound(conn, read_by, stopping)
-    population = ({int(row[0]): int(row[1]) for row in _rows(
-        conn, COHORT_PHASH_POP_SQL, {"hashes": sorted(hashes)})} if hashes else {})
+    # The set goes before the statement runs (~84 B a hash): only its sorted list is bound.
+    wanted = sorted(hashes)
+    del hashes
+    population = _population(conn, wanted)
+    del wanted
     facts = SqlFacts(conn, population=population, stopping=stopping)
-    listings: dict[int, Listing] = {}
-    fps: dict[int, Any] = {}
+    # E962: each chunk's facts and fingerprints are folded into the cut and dropped before the
+    # next chunk is read, so the cut holds counts, never the scope (`calibration_cut`).
+    cut = CalibrationCut(settings)
     for start in range(0, len(ids), chunk):
         if read_by is not None:
             _cut_bound(conn, read_by, stopping)
         # Fingerprints read no CLIP vector, so the cut skips the read that would move ~2 kB per
         # photograph for nothing.
-        for listing_id, (listing, images) in facts.facts(ids[start:start + chunk],
-                                                         clip=False).items():
-            listings[listing_id] = listing
-            fps[listing_id] = build_fingerprint(listing, images, settings)
-    calibration = Calibration.build(fps, listings, settings, generation)
+        read = facts.facts(ids[start:start + chunk], clip=False)
+        cut.fold({listing_id: build_fingerprint(listing, images, settings)
+                  for listing_id, (listing, images) in read.items()},
+                 {listing_id: listing for listing_id, (listing, _images) in read.items()})
+        del read
+    calibration = cut.build(generation)
+    del cut
     if deadline is not None:
         _cut_bound(conn, deadline, stopping)
-    rows = [{"phash": phash, "n_listings": n} for phash, n in sorted(population.items())]
-    for start in range(0, len(rows), POP_CHUNK):
-        _exec_many(conn, RT_PHASH_POP_WRITE_SQL, rows[start:start + POP_CHUNK])
+    order = sorted(population)
+    for start in range(0, len(order), POP_CHUNK):
+        _exec_many(conn, RT_PHASH_POP_WRITE_SQL, [
+            {"phash": phash, "n_listings": population[phash]}
+            for phash in order[start:start + POP_CHUNK]])
     payload = json.dumps(calibration.to_json(), ensure_ascii=False, sort_keys=True)
     _exec(conn, RT_CALIBRATION_WRITE_SQL, {
         "generation": generation, "digest": calibration.digest(),
@@ -2675,7 +2712,7 @@ def cut_calibration(conn: Any, settings: Settings, model_version: str | None,
         "settings": json.dumps(settings.to_dict(), sort_keys=True),
         "model_version": model_version})
     return {"digest": calibration.digest(), "n_listings": calibration.n_listings,
-            "scope_listings": len(ids), "hashes": len(hashes),
+            "scope_listings": len(ids), "hashes": n_hashes,
             "hashes_measured": len(population), "statements": facts.statements + 4,
             "seconds": round(time.perf_counter() - clock, 3)}
 

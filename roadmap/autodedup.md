@@ -69,7 +69,13 @@ data. The legacy engine's history is [`dedup-track.md`](dedup-track.md) — neve
   and `MAX_SCHEMA_MB` is 10,000: 7 towns + Praha whole (paged) + the 12 okresy = 323,128 ads,
   ~7,030 MB projected (the number is the operator's, D907). The seed is `fresh=true`: every live
   area stops merging until the build ends. Open (E940): the cap binds that scope's cadence 4× (240
-  walks a day asked, 60 allowed), so Praha is read whole every ~3 days.
+  walks a day asked, 60 allowed), so Praha is read whole every ~3 days. **E962 (done 2026-10-17):**
+  the calibration cut streams (a chunk folded and dropped, the calibration byte-identical on the
+  trial and c18), ~4-10 kB an advert at its peak by block size (bounded at 12 kB) against ~58 kB,
+  so the 323,128-ad seed projects ~1.9-2.3 GiB on the 16 GiB runner (it would have been
+  OOM-killed at ~18 GiB) and the memory bound admits 699,050 ads (`MAX_SCHEMA_MB` binds first,
+  above ~470k); its payload, ~80-120 MB of jsonb, sits under the 256 MB limit. Owed: `Calibration.build` is now only the tests' oracle — fold it
+  into the stream with the next change that moves the engine digest.
 - **E941 (2026-10-09, S0 rails for the widened S1, ~38k ads):** the seed re-checks storage after its
   walk and cut (+18 KiB an ad), `MAX_SCHEMA_MB` 1,500, no quarter beside its town, the rate halved
   before each pass, `peak_rss_mb` in the heartbeat, SIGTERM stops the pass and frees the lease at
