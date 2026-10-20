@@ -12,7 +12,7 @@ offline, before a bypass ships.
 Pre-578 SQL producers (refresh_location_pin_audit_mv, the browse_list blue-green
 rebuild, refresh_llm_cost_rollups) keep their inline concurrent-refresh + stamp shapes —
 they are pinned by tests/test_derived_artifacts_stamping.py and were never the blocking
-class (refresh_health_matviews and the map's rebuild were two more, until migrations 642
+class (refresh_health_matviews and the map's rebuild were two more, until migrations 643
 and 631 dropped them). New SQL producers should call the chokepoint.
 
 Every test states the mutation that makes it RED.

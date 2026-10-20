@@ -223,7 +223,7 @@ def test_the_singleton_state_table_is_gone(conn):
 def test_the_registry_base_table_stays_closed_to_browser_roles(conn):
     """The base table stays behind RLS and unreadable by both browser roles. The browser sees an
     artifact's freshness only as its Health cell (pipeline_checks_public); derived_artifacts_public,
-    the registry's old browser view, went in migration 642."""
+    the registry's old browser view, went in migration 643."""
     with conn.cursor() as cur:
         cur.execute(
             "select has_table_privilege('authenticated', 'public.derived_artifacts', 'SELECT'), "

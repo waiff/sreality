@@ -311,7 +311,7 @@ evaluate (its newest row is from 2026-09-13), so wave 4 deleted it, with the ces
 mmreality slice writes only it read. Health asks the same question by measurement now, not by a
 latched flag: the `coverage` gauge holds each unit's active ads against its declared total and
 counts the active ads no walk can nominate, and the `scraping` alarm times each unit's newest
-walk that reached the end. Migration 642 (Health wave 9) dropped `portal_coverage_gate`;
+walk that reached the end. Migration 643 (Health wave 9) dropped `portal_coverage_gate`;
 `supports_complete_walk` (no writer now; the Scrapers page's portal posture still reads it) and
 those two portals' `portal_index_slices` rows (unread) stay, owned by the scraper track; idnes
 keeps writing and reading its own slices for its stalest-first order.
@@ -702,7 +702,7 @@ rules. Identify which one a task belongs to before you start.
   Health reads the view `pipeline_checks_public`, gated inside its own WHERE by
   `is_platform_admin()`; the admin-gated Health/ops RPCs (`health_summary`,
   `scraper_health_checks`, `recent_scrape_runs`, …; migrations 318/332/340) went in migration
-  642. A new RPC is INVOKER by default; a DEFINER one that reads admin-only
+  643. A new RPC is INVOKER by default; a DEFINER one that reads admin-only
   data embeds the admin gate or carries a `-- ci-allow-ungated:` reason
   (`tests/test_migration_rls_grants.py`, rule 5). Anything else private goes through the
   FastAPI service.
@@ -2618,7 +2618,7 @@ renumber.** Navigate by area:
     interval 0 = off) and an `unalerted` cell (an alarm cell measured failing now and two cadences
     ago with no open incident); a subject that stops failing reads `ok` while its incident is open,
     so it recovers on a measured OK. It replaced the `worker_liveness` check and migration 274's 24 h
-    dead-man job (`emit-verification-stale-alert`, unscheduled by 620; its function went in 642). **The
+    dead-man job (`emit-verification-stale-alert`, unscheduled by 620; its function went in 643). **The
     canary** is the ONE monitoring workflow, `verify_pipeline.yml` (cron hourly; GitHub delivers
     about five runs a day): it records every other workflow's production runs (the poller: event
     `schedule`, or `push` on `main`; each red with its reason line, judged by the `jobs` check as a
@@ -4880,7 +4880,7 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
   W4-c had left it 61 wide because five health matviews depended on the VIEW, not on its columns, so
   `create or replace` (append-only) was the only shape available; 517 took the width **blue-green**
   (rename the wide view aside, create the narrow one, rebuild each matview beside itself, swap under a
-  5s `lock_timeout`). Migration 642 dropped those matviews and `portal_listing_counts`, so no view or
+  5s `lock_timeout`). Migration 643 dropped those matviews and `portal_listing_counts`, so no view or
   matview depends on `listings_public` now. The 17 that went had no reader anywhere: four typed-NULL
   placeholders, the ten legacy place columns `display_label` replaced, `broker_name`, and the two
   condition levels (Browse read them off `browse_list` until condition scoring was parked, rule #14).

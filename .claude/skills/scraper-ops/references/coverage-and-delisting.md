@@ -256,7 +256,7 @@ nothing left to evaluate (its newest evaluation is from 2026-09-13). What it
 reported as posture is measured now: the `coverage` gauge holds each unit's active
 ads against its declared total and counts the active ads no walk can nominate, and
 the `scraping` alarm's walks arm times each unit's newest walk that reached the
-end. Migration 642 (Health wave 9) dropped `portal_coverage_gate` (153 rows). It
+end. Migration 643 (Health wave 9) dropped `portal_coverage_gate` (153 rows). It
 did not drop `portals.supports_complete_walk` (no writer now; the Scrapers page's
 portal posture still reads it) or the 150 ceskereality and mmreality rows of
 `portal_index_slices` (unread, unjudged): the scraper track owns both.

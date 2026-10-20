@@ -48,7 +48,7 @@ Independent of the analytical, UI, and map tracks.
   and mmreality's `_record_slice` + `SLICE_KEY`, the slice writes only it read. It had been a no-op
   since every scraper portal's flag came back true (its newest evaluation is from 2026-09-13). idnes
   keeps its slice ledger for its stalest-first order (`slice_staleness`).
-- **Left after Health wave 9** (migration 642 dropped `portal_coverage_gate`; wave 9 as built did
+- **Left after Health wave 9** (migration 643 dropped `portal_coverage_gate`; wave 9 as built did
   not drop the other three, so this track owns them): the 150 unread ceskereality and mmreality
   rows of `portal_index_slices` (unjudged), `portals.supports_complete_walk` (no writer now; the
   Scrapers page's portal posture still reads it) and `delist_flip_refusals`, still written by

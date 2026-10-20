@@ -1,4 +1,4 @@
-"""Migration 642's rails (Health W9): exactly the old health layer goes, in one transaction, and the arbiter stays."""
+"""Migration 643's rails (Health W9): exactly the old health layer goes, in one transaction, and the arbiter stays."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from tests.test_measure_registry_census import effective_sql_definitions
 from tests.test_migration_rls_grants import _dynamic_ddl
 from toolkit.system_alerts import _OPEN_SQL
 
-SQL = (MIGRATIONS / "642_drop_legacy_health_layer.sql").read_text(encoding="utf-8")
+SQL = (MIGRATIONS / "643_drop_legacy_health_layer.sql").read_text(encoding="utf-8")
 S440 = (MIGRATIONS / "440_derived_artifacts_registry_completion.sql").read_text(encoding="utf-8")
 S441 = (MIGRATIONS / "441_stamp_derived_artifact.sql").read_text(encoding="utf-8")
 S621 = (MIGRATIONS / "621_platform_checks.sql").read_text(encoding="utf-8")
@@ -79,7 +79,7 @@ def test_exactly_the_old_layer_goes_and_nothing_cascades() -> None:
     """RED by: a CASCADE, an EXECUTE-built drop, a dropped arbiter index or history table, a new object."""
     assert _dropped(SQL) == ({("relation", r) for r in MATVIEWS + VIEWS + TABLES}
                              | {("function", f) for f in FUNCTIONS} | {("column", c) for c in COLUMNS})
-    assert parse_objects(SQL) == [], "642 creates nothing; the apply receipt has nothing to probe"
+    assert parse_objects(SQL) == [], "643 creates nothing; the apply receipt has nothing to probe"
     code = _code(SQL)
     for absent in ("cascade", "drop index", "execute", "to_regproc("):
         assert absent not in code, absent
@@ -187,7 +187,7 @@ def test_pre_guards_exactly_what_goes_and_requires_the_arbiter() -> None:
     for probe in ("pg_views", "pg_matviews", "p.prosrc", "pg_depend", "cron.job", "scrape_cadence_minutes",
                   f"to_regclass('public.{ARBITER}') is null"):
         assert probe in flat, probe
-    assert flat.index(f"to_regclass('public.{ARBITER}') is null") < flat.index("raise notice '642: no pg_cron here")
+    assert flat.index(f"to_regclass('public.{ARBITER}') is null") < flat.index("raise notice '643: no pg_cron here")
 
 
 def test_post_names_what_goes_and_what_stays() -> None:
@@ -226,7 +226,7 @@ def test_the_comments_stop_naming_what_goes() -> None:
 
 
 def test_no_revert_is_replayed() -> None:
-    assert not list(MIGRATIONS.glob("642_revert*.sql")), "a revert beside 642 would be replayed by CI"
+    assert not list(MIGRATIONS.glob("643_revert*.sql")), "a revert beside 643 would be replayed by CI"
 
 
 def test_the_dml_touches_only_the_registry_the_settings_and_the_incidents() -> None:

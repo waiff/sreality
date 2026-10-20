@@ -139,7 +139,7 @@ def function_bodies(conn) -> dict[str, str]:
 # append-only. Scanning it here would report a phantom producer.
 #
 # 441 is the same case: its only literal stamp calls are the six inside
-# refresh_health_matviews' body, and migration 642 (Health W9) dropped that function,
+# refresh_health_matviews' body, and migration 643 (Health W9) dropped that function,
 # its six matviews and their registry rows. The helper 441 defines stays, and a
 # definition is not a call.
 _RETIRED_MIGRATIONS = {
@@ -312,7 +312,7 @@ def test_every_registry_row_is_stamped_by_something(registry, function_bodies):
     text, 625), and the inline UPDATE that `refresh_llm_cost_rollups` and the browse_list
     rebuild keep (the rollup cannot use the helper — it must pass its own watermark as
     `complete_through`). A fifth, scripts/refresh_image_stats.py's loop over its tuple,
-    went with its two matviews in migration 642.
+    went with its two matviews in migration 643.
     """
     literal, _ = _repo_call_sites()
     stamped: set[str] = set()

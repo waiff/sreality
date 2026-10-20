@@ -344,7 +344,7 @@ completed by 440) — one row per artifact carrying `producer` / `host` / `caden
 dropped along with its `_public` view, 437's temporary UNION adapter, and the SPA reader —
 every artifact is an ordinary row now. Same posture as 276: RLS on with zero policies,
 everything revoked, read by the backend only (the `jobs` check's `artifact/<name>` cells among
-them; migration 642 dropped its browser view `derived_artifacts_public`). **A new derived artifact needs a registry row**, and
+them; migration 643 dropped its browser view `derived_artifacts_public`). **A new derived artifact needs a registry row**, and
 `tests/test_derived_artifacts_registry.py` goes RED without one — its `_W7_BACKLOG` exemption
 set is now empty and **nothing may be added to it**. Two budgets are deliberately NOT their
 cadence: `broker_region_type_stats` 30 h (not 24 — its daily sweep itself runs up to 2h01m, so

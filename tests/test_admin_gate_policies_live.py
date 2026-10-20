@@ -200,7 +200,7 @@ def _gated_functions_in_migrations() -> set[str]:
 
 
 def test_every_gated_function_keeps_definer_and_a_pinned_search_path(conn):
-    """The admin-gated functions (nine until migration 642 dropped the reporting set) keep their attributes.
+    """The admin-gated functions (nine until migration 643 dropped the reporting set) keep their attributes.
 
     This is the rail that replaced wave W1b rather than performing it. W1b would have
     rewritten 34 objects (25 views + these 9 functions) to spell the gate as
@@ -236,7 +236,7 @@ def test_every_gated_function_keeps_definer_and_a_pinned_search_path(conn):
     # The expected set comes from the migrations themselves: every function whose newest
     # `create` names the gate and is not dropped later. Comparing sets keeps the rail
     # non-vacuous without pinning a count: the nine reporting functions of 318/332/340 went
-    # in migration 642 (Health wave 9), so the set may legitimately be empty, while a
+    # in migration 643 (Health wave 9), so the set may legitimately be empty, while a
     # discovery predicate that stopped matching would still read as a mismatch.
     expected = _gated_functions_in_migrations()
     assert {name for name, _, _ in rows} == expected, (

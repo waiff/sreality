@@ -83,7 +83,7 @@ _MARKET_VIEWS: list[str] = ["property_estimates_public"]
 # browse_*, price_stat_*), so listing them would force a large, churny allowlist
 # and train people to add entries reflexively. The residual blind spot — an
 # admin-only aggregate over ONLY those tables (data_quality_by_source was one,
-# until migration 642 dropped it) — is covered only by the enumerated lists below.
+# until migration 643 dropped it) — is covered only by the enumerated lists below.
 # Tenant tables are excluded too: they are scoped by RLS + security_invoker, a
 # different mechanism with its own tests.
 #
@@ -1070,7 +1070,7 @@ def test_pipeline_card_read_is_account_scoped_after_respelling(
 # query filter -- evaluated per-request, independent of RLS/security_invoker/ownership.
 # The six dedup engine views and publication_gate_health_public came out with
 # migration 475; dedup_vision_bakeoff_results_public stays (frozen verdict cache).
-# Migration 642 (Health W9) dropped the old Health layer's seven views here and
+# Migration 643 (Health W9) dropped the old Health layer's seven views here and
 # every admin-gated function this file listed (four set-returning, five scalar).
 _ADMIN_GATED_VIEWS: list[str] = [
     "dedup_vision_bakeoff_results_public",
@@ -1144,7 +1144,7 @@ def test_no_ungated_relation_reads_admin_only_data(svc: Any) -> None:
 # Views whose gate the seed fixture below can prove BEHAVIOURALLY (a service-role
 # read returns >= 1 row, so a non-admin's 0 is the gate rather than an empty table,
 # and an admin's 0 is a gate that stayed shut). Established by seeding production
-# inside a rolled-back transaction and diffing each view's count. Since migration 642
+# inside a rolled-back transaction and diffing each view's count. Since migration 643
 # dropped the ones the seed could not reach (detail_latency_recent, an aggregate whose
 # row count does not move for one extra base row; the matview-backed views and the
 # functions, which need a refresh chain the replay never runs), every gated view

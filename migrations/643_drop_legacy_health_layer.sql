@@ -1,7 +1,7 @@
--- 642_drop_legacy_health_layer.sql -- the old health layer goes: its 10-minute refresh, 8 matviews, 12 views,
+-- 643_drop_legacy_health_layer.sql -- the old health layer goes: its 10-minute refresh, 8 matviews, 12 views,
 -- 11 functions, 4 tables, 6 columns, 8 registry rows and 3 settings rows (Health dashboard sprint, wave 9;
 -- docs/design/health-dashboard.md, "Wave 9: Drop the old health layer"). The plan and the headers of migrations 620
--- and 621 call this file 624; it is 642 as applied, because 624 would replay before 625-640, which production
+-- and 621 call this file 624; it is 643 as applied, because 624 would replay before 625-640, which production
 -- applied first.
 --
 -- ===========================================================================
@@ -12,7 +12,7 @@
 --       (scripts/resolve_brokers.py);
 --   (2) 48 h in which no browser role read a dropped view or called a dropped function (pg_stat_statements by
 --       userid, against the baseline of 2026-10-19 23:50Z, so not before 2026-10-21 23:50Z);
---   (3) the R2 backup has been read back (backup_before_drop.yml, label health-legacy-642: the four tables and
+--   (3) the R2 backup has been read back (backup_before_drop.yml, label health-legacy-643: the four tables and
 --       data_quality_snapshots whole; the definitions of the 8 matviews and 12 views; ops_incidents' five engine
 --       columns and portals.scrape_cadence_minutes as key + column CSVs; derived_artifacts and app_settings whole).
 -- Forward only (rule 1): a restore is that backup plus the function statements of migrations 274, 318, 332, 340
@@ -96,7 +96,7 @@
 -- no EXECUTE builds anything.
 --
 -- APPLY from main once the PR has merged and deployed, the gate holds and the backup is read back (627's order):
--- apply_migration.yml --ref main -f file=642_drop_legacy_health_layer.sql, a dry run, then dry_run=false
+-- apply_migration.yml --ref main -f file=643_drop_legacy_health_layer.sql, a dry run, then dry_run=false
 -- confirm=APPLY. Within 24 h of the last image refresh before the merge (as little as ~15 h after the deploy): the two image rows
 -- turn Problem 24 h after their last refresh (a 6 h budget + 18 h GitHub delivery slack). After any resolve_brokers_full run that started before the merge has ended:
 -- it would re-create broker_resolution_last_complete. With psql running in minute :x2-:x4 or :x7-:x9: the */10
@@ -166,7 +166,7 @@ begin
    where a.attrelid = 'public.portals'::regclass and a.attname = 'scrape_cadence_minutes' and not a.attisdropped;
 
   if to_regclass('public.ops_incidents_open_signature_uq') is null then
-    raise exception '642 refused: ops_incidents_open_signature_uq, the cell ladder''s ON CONFLICT arbiter, is missing; this file keeps it and runs only beside it';
+    raise exception '643 refused: ops_incidents_open_signature_uq, the cell ladder''s ON CONFLICT arbiter, is missing; this file keeps it and runs only beside it';
   end if;
 
   -- DROP FUNCTION IF EXISTS on a signature that does not exist is a silent notice: an overload this file does not
@@ -174,7 +174,7 @@ begin
   select string_agg(p.oid::regprocedure::text, ', ' order by p.oid::regprocedure::text) into v_bad
     from pg_proc p where p.oid = any (v_fns) and p.oid <> all (v_sigs);
   if v_bad is not null then
-    raise exception '642 refused: % is not a signature this file drops', v_bad;
+    raise exception '643 refused: % is not a signature this file drops', v_bad;
   end if;
 
   select string_agg(x, ', ' order by x) into v_bad from (
@@ -229,18 +229,18 @@ begin
          or (d.refobjid = 'public.portals'::regclass and d.refobjsubid = any (v_cadence)))
   ) deps;
   if v_bad is not null then
-    raise exception '642 refused: % still name(s) or depend(s) on what this file drops', v_bad;
+    raise exception '643 refused: % still name(s) or depend(s) on what this file drops', v_bad;
   end if;
 
   if to_regclass('cron.job') is null then
-    raise notice '642: no pg_cron here (the CI replay); the job checks are skipped';
+    raise notice '643: no pg_cron here (the CI replay); the job checks are skipped';
     return;
   end if;
   select string_agg(j.jobname, ', ' order by j.jobname) into v_bad
     from cron.job j
    where j.jobname <> 'refresh-health-dashboard' and j.command ~ v_names;
   if v_bad is not null then
-    raise exception '642 refused: pg_cron job(s) % call what this file drops', v_bad;
+    raise exception '643 refused: pg_cron job(s) % call what this file drops', v_bad;
   end if;
   -- Reported, never refused on: a run in flight holds health_summary_mv until it ends, so step 2 waits out the 5 s
   -- lock limit and the workflow's retry re-runs the file.
@@ -252,7 +252,7 @@ begin
    where j.jobname = 'refresh-health-dashboard'
      and r.status in ('starting', 'connecting', 'sending', 'running');
   if v_bad is not null then
-    raise notice '642: refresh-health-dashboard run(s) not finished: %', v_bad;
+    raise notice '643: refresh-health-dashboard run(s) not finished: %', v_bad;
   end if;
 end
 $pre$;
@@ -264,7 +264,7 @@ $pre$;
 do $cron$
 begin
   if to_regclass('cron.job') is null then
-    raise notice '642: no pg_cron here; nothing to unschedule';
+    raise notice '643: no pg_cron here; nothing to unschedule';
   else
     perform cron.unschedule(j.jobid) from cron.job j where j.jobname = 'refresh-health-dashboard';
   end if;
@@ -366,7 +366,7 @@ update public.ops_incidents
 -- 11. The comments.
 -- ---------------------------------------------------------------------------
 comment on table public.ops_incidents is
-  'Cell incidents (migrations 619, 621 and 642): one row per failing health cell, signature '
+  'Cell incidents (migrations 619, 621 and 643): one row per failing health cell, signature '
   'cell:<check_key>:<subject>, at most one open per signature (ops_incidents_open_signature_uq). '
   'toolkit/system_alerts.reconcile opens it, keeps it (last_seen_at), holds its recovery (ok_since) and resolves '
   'it (resolved_at, resolve_reason), and tells each onset, reminder and recovery as a system_health '
@@ -378,12 +378,12 @@ comment on table public.ops_incidents is
 comment on index public.ops_incidents_open_signature_uq is
   'The cell ladder''s ON CONFLICT arbiter (toolkit/system_alerts._OPEN_SQL: ON CONFLICT (signature) WHERE '
   'resolved_at IS NULL): at most one open incident per signature. Migration 621''s header lists it with the '
-  'signature engine''s objects; migration 642 keeps it, because without it every incident open fails (42P10).';
+  'signature engine''s objects; migration 643 keeps it, because without it every incident open fails (42P10).';
 
 comment on table public.data_quality_snapshots is
   'Frozen history (ruling Q5): per-source field fill, captured every 6 h until migration 633 unscheduled '
   'capture-data-quality (last capture 2026-10-19). Its view data_quality_by_source and its one reader, '
-  'scraper_health_checks_mv, went in migration 642; the data_quality gauge replaced them. Nothing writes or '
+  'scraper_health_checks_mv, went in migration 643; the data_quality gauge replaced them. Nothing writes or '
   'reads it.';
 
 comment on table public.pipeline_check_results is
@@ -433,7 +433,7 @@ begin
       'ops_incident_runs']) as n
    where to_regclass('public.' || n) is not null;
   if v_left is not null then
-    raise exception '642 did not land: % still exist(s)', v_left;
+    raise exception '643 did not land: % still exist(s)', v_left;
   end if;
   -- By name, any overload: a DROP with a wrong signature is a silent no-op.
   select string_agg(p.oid::regprocedure::text, ', ' order by p.oid::regprocedure::text) into v_left
@@ -443,7 +443,7 @@ begin
                        'category_trends', 'image_storage_overview', 'images_failure_overview', 'recent_scrape_runs',
                        'workflow_failure_summary', 'recent_workflow_failures', 'emit_verification_stale_alert');
   if v_left is not null then
-    raise exception '642 did not land: % still exist(s)', v_left;
+    raise exception '643 did not land: % still exist(s)', v_left;
   end if;
   select string_agg(format('%s.%s', a.attrelid::regclass, a.attname), ', ' order by a.attname) into v_left
     from pg_attribute a
@@ -452,54 +452,54 @@ begin
            and a.attname in ('workflow_paths', 'origins', 'sample_run_url', 'sample_excerpt', 'failure_count'))
        or (a.attrelid = 'public.portals'::regclass and a.attname = 'scrape_cadence_minutes'));
   if v_left is not null then
-    raise exception '642 did not land: column(s) % still exist', v_left;
+    raise exception '643 did not land: column(s) % still exist', v_left;
   end if;
   -- Names, never a count: the registry holds other rows at this point of a replay than live.
   if exists (select 1 from public.derived_artifacts
               where name in ('health_summary_mv', 'portal_health_mv', 'scraper_health_checks_mv',
                              'snapshot_churn_24h_mv', 'category_trends_mv', 'health_mv_refresh_stamp',
                              'image_storage_overview_mv', 'images_failure_overview_mv')) then
-    raise exception '642 did not land: a dropped matview''s derived_artifacts row survived';
+    raise exception '643 did not land: a dropped matview''s derived_artifacts row survived';
   end if;
   if exists (select 1 from public.app_settings
               where key in ('pipeline_check_thresholds', 'broker_resolution_last_complete',
                             'property_sweep_last_complete')) then
-    raise exception '642 did not land: a retired app_settings row survived';
+    raise exception '643 did not land: a retired app_settings row survived';
   end if;
   if exists (select 1 from public.ops_incidents
               where resolved_at is null and not starts_with(signature, 'cell:')) then
-    raise exception '642 did not land: an open incident outside the cell namespace survived';
+    raise exception '643 did not land: an open incident outside the cell namespace survived';
   end if;
   if not exists (select 1 from pg_index i
                   where i.indexrelid = to_regclass('public.ops_incidents_open_signature_uq')
                     and i.indrelid = 'public.ops_incidents'::regclass
                     and i.indisunique and i.indisvalid
                     and pg_get_indexdef(i.indexrelid) like '%(signature) WHERE (resolved_at IS NULL)') then
-    raise exception '642 did not land: ops_incidents_open_signature_uq, the ladder''s ON CONFLICT arbiter, is not a valid unique (signature) where resolved_at is null';
+    raise exception '643 did not land: ops_incidents_open_signature_uq, the ladder''s ON CONFLICT arbiter, is not a valid unique (signature) where resolved_at is null';
   end if;
   if to_regclass('public.data_quality_snapshots') is null then
-    raise exception '642 did not land: data_quality_snapshots is gone (ruling Q5 keeps it)';
+    raise exception '643 did not land: data_quality_snapshots is gone (ruling Q5 keeps it)';
   end if;
   if strpos(v_incidents, 'cell:<check_key>:<subject>') = 0 or strpos(v_incidents, 'failure signature') > 0 then
-    raise exception '642 did not land: the ops_incidents comment does not describe cell incidents';
+    raise exception '643 did not land: the ops_incidents comment does not describe cell incidents';
   end if;
   if strpos(v_results, 'pipeline_check_history_public') > 0 or strpos(v_results, 'pipeline_checks_public') = 0 then
-    raise exception '642 did not land: the pipeline_check_results comment still names a dropped view';
+    raise exception '643 did not land: the pipeline_check_results comment still names a dropped view';
   end if;
   if strpos(v_plausibility, 'data_quality_by_source') > 0
      or strpos(v_plausibility, 'scripts/checks/quality.py') = 0 then
-    raise exception '642 did not land: the measure_plausibility_by_source comment still names a dropped view';
+    raise exception '643 did not land: the measure_plausibility_by_source comment still names a dropped view';
   end if;
   if not (select c.relrowsecurity from pg_class c where c.oid = 'public.ops_incidents'::regclass)
      or exists (select 1 from unnest(array['anon', 'authenticated']::name[]) as r(role)
                  where has_any_column_privilege(r.role, 'public.ops_incidents', 'SELECT, INSERT, UPDATE, REFERENCES')
                     or has_table_privilege(r.role, 'public.ops_incidents', 'DELETE, TRUNCATE, TRIGGER')) then
-    raise exception '642 did not land: ops_incidents must stay RLS-on and closed to browser roles';
+    raise exception '643 did not land: ops_incidents must stay RLS-on and closed to browser roles';
   end if;
   if to_regclass('cron.job') is null then
-    raise notice '642: no pg_cron here; the unschedule is not asserted';
+    raise notice '643: no pg_cron here; the unschedule is not asserted';
   elsif exists (select 1 from cron.job where jobname = 'refresh-health-dashboard') then
-    raise exception '642 did not land: refresh-health-dashboard is still scheduled';
+    raise exception '643 did not land: refresh-health-dashboard is still scheduled';
   end if;
   -- Health's one read still answers; it reads only ops_incidents' kept columns.
   perform count(*) from public.pipeline_checks_public;

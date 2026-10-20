@@ -163,7 +163,7 @@ measured OK instead of closing silently after 7 days.
 (`scripts/verify_pipeline.py`), each entry with a one-line basis comment, passed to every check by
 `main()` and by the worker's health lane. Since wave 3 nothing overrides them: `DEFAULT_THRESHOLDS`,
 `load_thresholds` and its merge of `app_settings.pipeline_check_thresholds` are deleted (every
-override equalled its default; migration 642 deleted the row), so a threshold changes in a PR, with
+override equalled its default; migration 643 deleted the row), so a threshold changes in a PR, with
 its basis. Since Health dashboard sprint wave 6 that includes the fill and vocabulary arms' numbers
 (`parsing_fill_*`, `parsing_vocabulary_*`, `parsing_census_stale_days`, sized on the cohort's measured
 drift and passed to
@@ -176,7 +176,7 @@ Field capture W1 shipped this as the `field_fill_matrix` check; since Health das
 the `parsing` alarm's fill and vocabulary arms (`<portal>/fill/<field>`, `<portal>/vocabulary/<field>` and the
 `census` cell; the `parsing` section, below), measured every 6 h on the worker. The rationale holds.
 
-`data_quality_by_source` (dropped by migration 642) tested 26 fields for `IS NOT NULL`, blind to the two defect
+`data_quality_by_source` (dropped by migration 643) tested 26 fields for `IS NOT NULL`, blind to the two defect
 shapes the field-capture program exists to fix: a value that is PRESENT and outside every
 canonical option list (13 live `condition` spellings against a filter list of 6, ~14k active rows
 unreachable by any Browse filter), and a cell that has read 0.0 % since the parser was written
@@ -233,7 +233,7 @@ semantics the contract declares, so there is nothing yet to be right or wrong ag
 **Who owns which field.** The fill arm owns the 27 `LISTING_COLUMNS` attributes. `data_quality_by_source`'s
 seven probes with no attribute column (`geom`, `locality`, `street`, `property_grouped`, `source_url`, the
 two condition levels) froze with its capture in Health dashboard sprint wave 6 (migration 633 unscheduled
-`capture-data-quality`; migration 642 dropped the view): a portal link is the `data_quality` gauge's `url/<portal>`
+`capture-data-quality`; migration 643 dropped the view): a portal link is the `data_quality` gauge's `url/<portal>`
 cell, a town the location gauge's.
 
 **The census half** is checked in per portal under `data/field_capture/census/` and re-blessed
@@ -270,7 +270,7 @@ ended**.
   `<portal>/walks/<unit>` cells keep aging against G (§ `scraping` below), and `<portal>/walks`
   is a Problem once no walk has finished in 30 d. No check reads `errors`: the two arms a crash
   used to light, `stuck` (`ended_at is null`) and `err_pct` (`errors`), went with
-  `scraper_health_checks()` in migration 642, and the delisting check's
+  `scraper_health_checks()` in migration 643, and the delisting check's
   `<portal>/stuck` cell is another thing (active ads whose gone verdict waits past its limit).
 - It catches `BaseException`, not `Exception`: a SIGINT or `SystemExit` out of a phase leaves the
   run just as unfinished as a `CheckViolation`, and "did not finish" must never read as green.
@@ -657,7 +657,7 @@ so the canary and Health see liveness at once. It replaces two guards: `worker_l
 with a probability of about D / 4.9 h), deleted with `worker_stale_fail_minutes` — the ladder
 closes any open `cell:worker_liveness:*` incident silently as `retired` once its registry row is
 gone; and migration 274's dead-man job `emit-verification-stale-alert` (24 h on the newest row of
-any key; it never fired), which 620 unscheduled and 642 dropped.
+any key; it never fired), which 620 unscheduled and 643 dropped.
 
 **The canary: `verify_pipeline.yml`**, "Monitoring: health canary (hourly)": cron `15 * * * *`
 plus a manual dispatch whose `dry_run` input reaches the harness step only. GitHub delivers about
@@ -1104,7 +1104,7 @@ when every scope it walked reached the end (a scope it never started leaves no e
 reaches the end (`scrape_runs` records no run arguments); and no per-attempt stamp exists, so the
 fetch-error denominator approximates "attempted in 24 h". It replaces `walk_end_streak` and
 `walk_coverage` (with `_SELF_CERTIFYING_TOTALS`, now the `Portal.total_is_count` seam); the old
-page's SQL checks on the same questions rendered until wave 8 retired the page, and migration 642 dropped them.
+page's SQL checks on the same questions rendered until wave 8 retired the page, and migration 643 dropped them.
 
 ## `publishing` — do new ads reach Browse quickly, with their photos? (wave 4)
 
@@ -1226,7 +1226,7 @@ VERIFY priority and count in the backlog; "active again" includes probe and refe
 verdict older than the ledger's 7 days is pruned, so stuck can never see it. It replaces
 `false_delist_share` (a mixed 7-day window) and `delist_flip_refused` (7 days of
 `delist_flip_refusals`, a table nothing reads after it); the old page's `delisting_latency` and
-`delisting_spike` matview checks rendered until wave 8 retired the page (migration 642 dropped the matview).
+`delisting_spike` matview checks rendered until wave 8 retired the page (migration 643 dropped the matview).
 
 ## `coverage` — do we hold what each portal shows? (wave 4, gauge)
 
@@ -1600,7 +1600,7 @@ sreality's old-API rows, which `floor_convention` watched until Q4 deleted it) h
 
 It replaces `field_fill_matrix`, `ppm2_measure_coverage`'s 7-day arm, `ppm2_median_shift` and
 `location_payload_shape_drift` with `SREALITY_SHAPE_CASE_SQL` and `_LOCATION_SHAPE_REMEDY` (portal literals in
-shared code); and on the old page, until wave 8 retired it, the SQL `snapshot_churn` and `field_null_drift` rungs (migration 642 dropped them).
+shared code); and on the old page, until wave 8 retired it, the SQL `snapshot_churn` and `field_null_drift` rungs (migration 643 dropped them).
 
 ## The quality gauges — `data_quality`, `location_town_coverage`, `text_extraction` (Health dashboard sprint wave 6)
 
@@ -1668,7 +1668,7 @@ It replaces `ppm2_basis_floor_share`, `area_vs_usable_divergence`, `outbound_url
 `ppm2_measure_coverage`'s stock arm and `floor_convention` (deleted, Q4), and `data_quality_by_source` with the
 `capture-data-quality` job: migration 633 unschedules the job (24 failures in 30 d, statement timeouts and "job
 startup timeout", each ringing the `jobs` check's cron cell for a job this gauge supersedes), and
-`data_quality_snapshots` stays as frozen history (Q5): migration 642 dropped the view and kept the table.
+`data_quality_snapshots` stays as frozen history (Q5): migration 643 dropped the view and kept the table.
 
 ### `location_town_coverage` — rule 25's invariant over active ads
 
