@@ -397,8 +397,9 @@ class PortalConfig:
 
     - supports_complete_walk: can the portal prove a near-complete index walk?
       Posture only since 2026-09-07, with no writer since Health wave 4 (the coverage gate
-      retired; the column goes in wave 9) — it
-      gates no delisting; `walk_reached_end` gates nomination (rule #3).
+      retired; Health wave 9 kept the column, the Scrapers page still reads it, and the
+      scraper track owns it) — it gates no delisting; `walk_reached_end` gates nomination
+      (rule #3).
     - categories: the per-portal list of category descriptors the runner walks.
       Shape is portal-specific (the Portal object interprets it).
     - split_threshold: deep-pagination cap above which a category is walked

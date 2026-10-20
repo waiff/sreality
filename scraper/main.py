@@ -879,9 +879,9 @@ def _walk_category_split(
     # The gate: every district ended on a signal from sreality, and nothing of
     # ours stopped us anywhere in the category. The union-vs-probe arithmetic is
     # NOT part of it any more — it survives as the fallback trigger above and as
-    # the coverage number logged here (and by the runner, into
-    # scrape_runs.by_category), where a persistent gap is visible without
-    # silencing a whole category's delisting.
+    # the coverage number logged here (and by the runner, whose
+    # scrape_runs.by_category keeps both counts), where a persistent gap is
+    # visible without silencing a whole category's delisting.
     reasons = list(district_reasons.values()) + category_stops
     ended = {r: stop_is_portal_end(r) for r in set(reasons)}
     reached_end = walk_reached_end(

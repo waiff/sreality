@@ -528,7 +528,7 @@ def test_every_id_is_reachable_within_one_wrap() -> None:
     assert seen == set(ids)
 
 
-def test_truncated_sweep_scopes_the_clear_and_withholds_the_completion_stamp(
+def test_truncated_sweep_scopes_the_clear_and_keeps_the_lap_open(
     monkeypatch: Any,
 ) -> None:
     """The A2 bug in one test: the sweep broke out on --max-seconds, then wiped the
@@ -553,20 +553,15 @@ def test_truncated_sweep_scopes_the_clear_and_withholds_the_completion_stamp(
     cursor = _params(conn, "jsonb_build_object('last_id'")
     assert cursor == {"key": "broker_sweep_cursor", "last_id": 2,
                       "lap_swept": 2, "lap_started_at": None}
-    # ...and a lap that has not gone all the way round stamps nothing.
-    assert not any("completed_at" in s for s in conn.executed)
 
 
-def test_lap_closes_across_truncated_sweeps_and_only_then_stamps(
+def test_lap_closes_across_truncated_sweeps_and_only_then_reopens(
     monkeypatch: Any,
 ) -> None:
-    """The composing assertion the two halves were missing. Truncation is the
-    DESIGNED steady state (the 2026-08-10 sweep attributed 480,000 of 535,007 ids
-    inside its budget), so a stamp that needs one run to walk everything would never
-    be written at all — a permanently amber check that never rings — while the one
-    light day that did fit would age past the fail threshold two days later with the
-    rotation working perfectly. Coverage is therefore tracked across runs and the
-    stamp lands when the LAP closes."""
+    """Truncation is the DESIGNED steady state (the 2026-08-10 sweep attributed
+    480,000 of 535,007 ids inside its budget), so coverage is tracked across runs:
+    the LAP closes, and reopens from zero, only once the rotation has been all the
+    way round."""
     import time
 
     import scripts.resolve_brokers as rb
@@ -575,7 +570,7 @@ def test_lap_closes_across_truncated_sweeps_and_only_then_stamps(
     cursor: int | None = None
     lap_swept = 0
     covered: set[int] = set()
-    stamps: list[Any] = []
+    laps: list[int] = []
     for _ in range(5):  # budget for one 2-id chunk per run
         conn = _ResilientConn("full")
         attributed = _stub_full_sweep(monkeypatch, ids, cursor=cursor,
@@ -584,18 +579,15 @@ def test_lap_closes_across_truncated_sweeps_and_only_then_stamps(
         covered.update(i for chunk in attributed for i in chunk)
         written = _params(conn, "jsonb_build_object('last_id'")
         cursor, lap_swept = written["last_id"], written["lap_swept"]
-        stamps.append(_params(conn, "completed_at"))
+        laps.append(lap_swept)
 
     assert covered == set(ids)
-    # nothing stamped until the rotation had actually been all the way round...
-    assert stamps[:4] == [None, None, None, None]
-    assert stamps[4]["key"] == "broker_resolution_last_complete"
-    assert stamps[4]["swept"] == len(ids)
-    # ...and closing the lap reopens a fresh one from zero.
-    assert lap_swept == 0
+    # the lap stays open until the rotation has actually been all the way round,
+    # and closing it reopens a fresh one from zero.
+    assert laps == [2, 4, 6, 8, 0]
 
 
-def test_complete_sweep_clears_globally_and_stamps_completion(monkeypatch: Any) -> None:
+def test_complete_sweep_clears_globally_and_closes_the_lap(monkeypatch: Any) -> None:
     """A walk that covered every id in ONE run is the only one allowed to wipe the
     whole queue (it re-attributed everything), and it closes the lap in one go."""
     import scripts.resolve_brokers as rb
@@ -607,8 +599,8 @@ def test_complete_sweep_clears_globally_and_stamps_completion(monkeypatch: Any) 
 
     assert attributed == [[1, 2], [3, 4]]
     assert _params(conn, "DELETE FROM dirty_broker_listings") == {"cutoff": "CUTOFF"}
-    stamp = _params(conn, "completed_at")
-    assert stamp["key"] == "broker_resolution_last_complete" and stamp["swept"] == 4
+    assert _params(conn, "jsonb_build_object('last_id'") == {
+        "key": "broker_sweep_cursor", "last_id": 4, "lap_swept": 0, "lap_started_at": None}
 
 
 def test_the_run_row_records_the_three_merge_counts_in_order(monkeypatch: Any) -> None:
@@ -693,8 +685,7 @@ def test_wrapped_window_clears_both_arms_of_the_range(monkeypatch: Any) -> None:
 
 def test_deadline_on_the_final_chunk_is_still_a_complete_walk(monkeypatch: Any) -> None:
     """The budget can expire while finishing the LAST chunk. That swept everything,
-    so it must still stamp completion — withholding it would red the freshness check
-    on a sweep that did its whole job."""
+    so it is still a complete walk: the queue clears globally and the lap closes."""
     import time
 
     import scripts.resolve_brokers as rb
@@ -705,7 +696,7 @@ def test_deadline_on_the_final_chunk_is_still_a_complete_walk(monkeypatch: Any) 
     rb._run_full(conn, [], [], True, 2, time.monotonic() - 1, reconnect=lambda: conn)
 
     assert attributed == [[1, 2]]
-    assert _params(conn, "completed_at") is not None
+    assert _params(conn, "jsonb_build_object('last_id'")["lap_swept"] == 0
     assert _params(conn, "DELETE FROM dirty_broker_listings") == {"cutoff": "CUTOFF"}
 
 

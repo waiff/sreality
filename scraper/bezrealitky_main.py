@@ -261,8 +261,8 @@ class BezrealitkyPortal(portal_runner.PortalDefaults):
         # descriptor means one stop reason for the whole category. A page cap is
         # our stop even when the loop ended naturally underneath it — it is an
         # operator restriction on this run, not a statement about coverage.
-        # `declared_total` no longer gates anything; the runner records the
-        # coverage verdict it implies into scrape_runs.by_category.
+        # `declared_total` no longer gates anything; the runner logs the coverage
+        # verdict it implies and records the total in scrape_runs.by_category.
         portal_end = stop_is_portal_end(stop)
         reached_end = walk_reached_end(
             portal_end=portal_end, our_stop=bool(self._max_pages) or not portal_end,

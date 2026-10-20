@@ -48,11 +48,12 @@ Independent of the analytical, UI, and map tracks.
   and mmreality's `_record_slice` + `SLICE_KEY`, the slice writes only it read. It had been a no-op
   since every scraper portal's flag came back true (its newest evaluation is from 2026-09-13). idnes
   keeps its slice ledger for its stalest-first order (`slice_staleness`).
-- **Left for wave 9** (a data delete is the destructive gate; only the first is on wave 9's list
-  so far): `portal_coverage_gate` (153 rows), the 150 unread ceskereality and mmreality rows of
-  `portal_index_slices`, `portals.supports_complete_walk` (no writer now; the SPA's portal posture
-  still reads it) and `delist_flip_refusals`, still written by `db.enqueue_presence_checks` and
-  read by nothing since `delist_flip_refused` went (a wave-9 drop removes the writer first).
+- **Left after Health wave 9** (migration 642 dropped `portal_coverage_gate`; wave 9 as built did
+  not drop the other three, so this track owns them): the 150 unread ceskereality and mmreality
+  rows of `portal_index_slices` (unjudged), `portals.supports_complete_walk` (no writer now; the
+  Scrapers page's portal posture still reads it) and `delist_flip_refusals`, still written by
+  `db.enqueue_presence_checks` and read by nothing since `delist_flip_refused` went (a drop
+  removes the writer first).
 - **Filed by the Health investigation (2026-10-18), owed to this track:** #1851 a sreality ad that
   answers HTTP 409 (615387212) is given up and re-armed forever by the walk's re-arm; #1852 the
   bazos rate-ledger lease overflows `smallint`, so every GitHub bazos walk falls back to per-process
@@ -468,7 +469,8 @@ Independent of the analytical, UI, and map tracks.
   sreality's national fallback — as a logged `COVERAGE` warning, never a gate. Both facts land
   in `scrape_runs.by_category` (`walk_reached_end` + `walk_coverage`, no migration) and
   `verify_pipeline`'s coverage check reports `categories_nominating` beside the gap (retired
-  2026-10-19 into the `scraping` and `coverage` checks).
+  2026-10-19 into the `scraping` and `coverage` checks; since Health wave 9 only `walk_reached_end`
+  is stored, the `walk_coverage` verdict logged).
 - bazos CI budget: `timeout-minutes` 75 → 130 with `--max-seconds 6600`. Since migration 488
   (22 scopes, ~2,400 pages) GitHub was cancelling the walk at 75 min, so the tail scopes never
   walked and the `scrape_run` was never finalized.

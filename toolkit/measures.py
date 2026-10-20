@@ -444,20 +444,6 @@ REGISTERED_SITES: tuple[RegisteredSite, ...] = (
         "This is the one division in the repo that is allowed to be a "
         "definition; every other consumer calls this function.",
     ),
-    RegisteredSite(
-        path="migrations/354_health_image_matviews_on_listing_id.sql"
-        "::materialized view:scraper_health_checks_mv",
-        arm="division",
-        hits=1,
-        measure=None,
-        kind=KIND_PROSE,
-        why="Not arithmetic: the health tile's `detail` string enumerates the "
-        "five fields the completeness-drift check watches — 'across price_czk "
-        "/ area_m2 / geom / locality / disposition'. Slashes separating a list "
-        "of column names. Unfixable in place anyway (migrations are "
-        "append-only, rule #1) and not worth a DDL replay of a 300-line "
-        "pg_cron matview to reword.",
-    ),
     # -- Python: the measure and its vocabulary ------------------------------
     RegisteredSite(
         path="toolkit/measures.py",

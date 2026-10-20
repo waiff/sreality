@@ -9,10 +9,11 @@ names, refreshes CONCURRENTLY (plain only on first populate), skips an in-flight
 duplicate, and stamps derived_artifacts. These rails keep the class unrepresentable,
 offline, before a bypass ships.
 
-Pre-578 SQL producers (refresh_health_matviews, refresh_location_pin_audit_mv, both
-blue-green rebuilds, refresh_llm_cost_rollups) keep their inline concurrent-refresh +
-stamp shapes — they are pinned by tests/test_derived_artifacts_stamping.py and were
-never the blocking class. New SQL producers should call the chokepoint.
+Pre-578 SQL producers (refresh_location_pin_audit_mv, the browse_list blue-green
+rebuild, refresh_llm_cost_rollups) keep their inline concurrent-refresh + stamp shapes —
+they are pinned by tests/test_derived_artifacts_stamping.py and were never the blocking
+class (refresh_health_matviews and the map's rebuild were two more, until migrations 642
+and 631 dropped them). New SQL producers should call the chokepoint.
 
 Every test states the mutation that makes it RED.
 """
@@ -102,8 +103,8 @@ def test_the_chokepoint_guards_before_it_refreshes():
         "derived_artifacts row) is gone — the silent-no-op stamp hole reopens"
     )
     assert "errcode = 'undefined_table'" in flat, (
-        f"{latest.name}: a missing matview must raise undefined_table so deploy-race "
-        "tolerant callers (scripts/refresh_image_stats.py) can keep catching it"
+        f"{latest.name}: a missing matview must raise undefined_table, so a caller racing "
+        "a deploy can tell a dropped matview from an unregistered name"
     )
     assert "refresh materialized view concurrently %i" in flat, (
         f"{latest.name}: the CONCURRENTLY branch is gone — readers would block again"

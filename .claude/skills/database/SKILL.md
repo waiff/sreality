@@ -150,7 +150,7 @@ where a caller needs it.
 - **Open with `set local lock_timeout = '5s';` when a migration GRANT/REVOKEs or
   CREATE-OR-REPLACEs a hot or cron-refreshed relation** (any matview, `browse_list`, `listings`).
   Those take ACCESS EXCLUSIVE and a whole-transaction loop holds every lock it already took —
-  without a timeout it queues behind, or blocks, the `*/10` health refresh or the `*/15` list rebuild.
+  without a timeout it queues behind, or blocks, the `*/15` list rebuild or an hourly matview refresh.
 - **Destructive migrations** (`DROP TABLE`/`COLUMN`, type-changing `ALTER`, `DELETE`
   without `WHERE`, `TRUNCATE`) — **pause for explicit operator OK** ("yes, apply it") and
   back up the affected data *first* (`backup_before_drop.yml`, to R2). There's no staging
@@ -343,18 +343,15 @@ completed by 440) — one row per artifact carrying `producer` / `host` / `caden
 `last_rows`. It **replaced** the singleton `browse_read_model_state`, which migration 440
 dropped along with its `_public` view, 437's temporary UNION adapter, and the SPA reader —
 every artifact is an ordinary row now. Same posture as 276: RLS on with zero policies,
-everything revoked, published through `derived_artifacts_public` (enumerated columns,
-`authenticated` only, not `security_invoker` — owner rights are what read through the RLS
-wall). **A new derived artifact needs a registry row**, and
+everything revoked, read by the backend only (the `jobs` check's `artifact/<name>` cells among
+them; migration 642 dropped its browser view `derived_artifacts_public`). **A new derived artifact needs a registry row**, and
 `tests/test_derived_artifacts_registry.py` goes RED without one — its `_W7_BACKLOG` exemption
-set is now empty and **nothing may be added to it**. Three budgets are deliberately NOT their
-cadence: the six health matviews get 45 min (not 10 — the 30d p95 gap is 15.8 min and a 10-min
-budget reads red on the healthy case) and `broker_region_type_stats` 30 h (not 24 — its daily
-sweep itself runs up to 2h01m, so 24 h alarms on every healthy run), both measured in 440's
-header; `property_sweep` (migration 622, the daily full sweep's completed cycle, stamped by
-`recompute_property_stats` in place of `app_settings.property_sweep_last_complete`) gets 38 h,
-because the `jobs` check adds GitHub's 18 h delivery slack to a `github-actions` row: Problem
-at 56 h, as ruled for the two-run cycle. `rent_map_cells`'s `host` is honestly `api-request`:
+set is now empty and **nothing may be added to it**. Two budgets are deliberately NOT their
+cadence: `broker_region_type_stats` 30 h (not 24 — its daily sweep itself runs up to 2h01m, so
+24 h alarms on every healthy run; measured in 440's header) and `property_sweep` (migration 622,
+the daily full sweep's completed cycle, stamped by `recompute_property_stats`) 38 h, because the
+`jobs` check adds GitHub's 18 h delivery slack to a `github-actions` row: Problem at 56 h, as
+ruled for the two-run cycle. `rent_map_cells`'s `host` is honestly `api-request`:
 it is refreshed inside a FastAPI request handler — don't launder it into a cron string.
 `llm_cost_rollup_state` is a watermark FOR an artifact, not an artifact, and is deliberately
 unregistered.
@@ -372,10 +369,8 @@ revoked from `public` *and* `anon`/`authenticated` (PostgreSQL's built-in defaul
 EXECUTE to PUBLIC, so revoking only the named roles leaves it callable). **Its UPDATE is
 deliberately a silent no-op on an unregistered name** — a producer must never fail because a
 metadata row is missing — a hole closed offline by `tests/test_derived_artifacts_stamping.py`,
-which extracts every name literal from both the repo tree and `pg_proc.prosrc`, checks every
-`producer` resolves to a real function or file, and pins the health fan-out to **six
-individual stamps, each right after its own REFRESH** (six real per-matview
-`last_duration_ms` values, since `clock_timestamp()` advances inside a transaction).
+which extracts every name literal from both the repo tree and `pg_proc.prosrc` and checks every
+`producer` resolves to a real function or file.
 `llm_cost_hour_rollup` keeps its own inline UPDATE because it must pass its own watermark as
 `complete_through`; don't unify it onto the helper without a fourth parameter.
 
@@ -395,7 +390,7 @@ claimed otherwise and drove the blocking design — never re-derive that claim f
 Every matview therefore needs one plain unique index (`tests/test_matview_indexes.py` pins
 this for all matviews, plus the exact broker index set — migration 508's DROP+CREATE
 silently lost 414's covering index and no test noticed). Pre-578 SQL producers
-(`refresh_health_matviews`, `refresh_location_pin_audit_mv`, the blue-green `rebuild_browse_list()`) keep
+(`refresh_location_pin_audit_mv`, the blue-green `rebuild_browse_list()`) keep
 their pinned inline shapes; new SQL producers call the chokepoint.
 
 **A `SECURITY DEFINER` gate in a view's WHERE is per-row ONLY when it is combined with a

@@ -288,7 +288,7 @@ def _walk_with(monkeypatch, n_items: int, total: int | None):
 # The 5th tuple element answers "did the walk reach bazos's last page?", not
 # "did the count reconcile?". The declared total jitters while a ~50 min walk
 # runs, so a deficit is normal on a finished walk; the numeric verdict stays
-# (walk_coverage, logged + recorded in scrape_runs.by_category) as an alarm.
+# (walk_coverage, logged; scrape_runs.by_category keeps its two counts) as an alarm.
 
 
 def test_walk_category_one_row_short_still_reaches_end(monkeypatch):

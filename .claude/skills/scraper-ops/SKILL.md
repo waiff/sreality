@@ -286,11 +286,10 @@ the bounded drain keeps a steady, polite fetch volume. GitHub throttles schedule
 cadence is slower, and Health judges the gap a portal keeps, not a declared one: the `scraping` check's `<portal>/walks/<unit>`
 cells age a unit's newest end-reached walk against G, the median start gap of the portal's finished walks over 14 d (under 10
 gaps, the slowest portal's G): Watch past 3 G, Problem past 6 G (crawlers ~43 h, sreality 26.5 h) or with no end-reached walk
-in 14 d; `<portal>/walks` is a Problem when no walk finished in 30 d (`THRESHOLDS` in `scripts/verify_pipeline.py`). No surface
-has read `scraper_health_checks()` since Health wave 8, so `portals.scrape_cadence_minutes` (migration 114), which it scales
-by, judges nothing; wave 9 drops both. Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
-run is never killed mid-batch, the next tick queues behind it. Per-category nominations are queued immediately after each
-category's walk, so even a timed-out index walk leaves a consistent partial result.
+in 14 d; `<portal>/walks` is a Problem when no walk finished in 30 d (`THRESHOLDS` in `scripts/verify_pipeline.py`).
+Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long run is never killed mid-batch, the
+next tick queues behind it. Per-category nominations are queued immediately after each category's walk, so even a timed-out
+index walk leaves a consistent partial result.
 
 The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only the **index walk** sets `index_pages>0`, and the portal checks read `run_type='index'` rows alone; the worker writes none (`run_id=None`), so the arms that must see its work read the queue, the completions ledger and listings. The image backfill (`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted the old liveness and reconciliation arms with `index_pages=0` noise.
 **The lifecycle around both phases lives in ONE place, `portal_runner.run_phase`** (rule #21; never re-add a per-portal copy): `ended_at` means the phase COMPLETED, so a phase that raises bumps `errors` and deliberately leaves `ended_at` NULL with `by_category` still `[]`: a crashed walk is never a finished walk, nor an end-reached one, even once the API's boot sweep stamps its `ended_at`, so its units' `<portal>/walks/<unit>` cells keep aging against G (the delisting check's `<portal>/stuck` cell is another thing: active ads whose gone verdict waits past its limit). The crash path logs and writes no incident (the signature engine retired in Health wave 3, migration 621): a red workflow run is the `jobs` check's `gh/<stem>` cell with its reason line, a portal raising inside the worker its `lane/<lane>/<portal>` cell. **The crash contract and the jobs check: `references/pipeline-verification.md`.**
@@ -465,7 +464,8 @@ RUN, COVERAGE, the closing `INDEX total=…` and every DRAIN line; per-page INDE
   a page check (rule #3), once per scope; `VERIFY orphans candidates=...` the ads in no walked scope; `VERIFY skipped ...: the walk did not reach the portal's end (our stop:
   ...)` when it may not, and `COVERAGE cm=... ct=...` WARNS when it nominates while short; `VERIFY DEFERRED`/`OVERRIDE` from `scraper.db`, `VERIFY failed` on an exception, `VERIFY dropped N NULL id(s)` = a parser bug
 - `RECONCILE cm=... ct=... sreality=... collected=... active=...` — portal-reported total vs
-  collected vs our active DB count (drift feeds the Health page)
+  collected vs our active DB count (`active=` lives in this log line only; the `scraping` check's missing arm and the
+  `coverage` gauge judge the gaps)
 - `INDEX total=N pages=M enqueued=K` once at end of the walk
 - `RUN done pages=N enqueued=M to_verify=V deferred=D errors=E` (E = failed categories)
 

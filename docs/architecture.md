@@ -311,9 +311,10 @@ evaluate (its newest row is from 2026-09-13), so wave 4 deleted it, with the ces
 mmreality slice writes only it read. Health asks the same question by measurement now, not by a
 latched flag: the `coverage` gauge holds each unit's active ads against its declared total and
 counts the active ads no walk can nominate, and the `scraping` alarm times each unit's newest
-walk that reached the end. `portal_coverage_gate`, `supports_complete_walk` (no writer now; the
-SPA's portal posture still reads it) and those two portals' `portal_index_slices` rows stay
-until wave 9; idnes keeps writing and reading its own slices for its stalest-first order.
+walk that reached the end. Migration 642 (Health wave 9) dropped `portal_coverage_gate`;
+`supports_complete_walk` (no writer now; the Scrapers page's portal posture still reads it) and
+those two portals' `portal_index_slices` rows (unread) stay, owned by the scraper track; idnes
+keeps writing and reading its own slices for its stalest-first order.
 The detail URL carries the category
 (`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
 one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×
@@ -696,14 +697,12 @@ rules. Identify which one a task belongs to before you start.
   `plans`); and page-specific RPCs (e.g.
   `browse_stats_properties`, `browse_map_cells`, `sold_comparables`). Most RPCs are
   `SECURITY INVOKER`: they read as the caller and cannot see past its grants and RLS. The
-  exceptions are `SECURITY DEFINER` — the Health/ops RPCs (`health_summary`,
-  `scraper_health_checks`, `recent_scrape_runs`, …; migrations 318/332/340), which embed
-  `is_platform_admin()` and hand anyone else NULL (the jsonb RPCs) or no rows (the
-  set-returning ones, e.g. `recent_scrape_runs`) and have had no SPA reader since Health
-  wave 8 (the page reads the view `pipeline_checks_public`, gated inside its own WHERE by
-  `is_platform_admin()`; wave 9 drops them), and `sold_coverage` (migration 545),
-  ungated on purpose but narrow by construction (a point in, four facts about one
-  municipality out). A new RPC is INVOKER by default; a DEFINER one that reads admin-only
+  exceptions are `SECURITY DEFINER`, such as `sold_coverage` (migration 545), ungated on
+  purpose but narrow by construction (a point in, four facts about one municipality out).
+  Health reads the view `pipeline_checks_public`, gated inside its own WHERE by
+  `is_platform_admin()`; the admin-gated Health/ops RPCs (`health_summary`,
+  `scraper_health_checks`, `recent_scrape_runs`, …; migrations 318/332/340) went in migration
+  642. A new RPC is INVOKER by default; a DEFINER one that reads admin-only
   data embeds the admin gate or carries a `-- ci-allow-ungated:` reason
   (`tests/test_migration_rls_grants.py`, rule 5). Anything else private goes through the
   FastAPI service.
@@ -1260,8 +1259,9 @@ renumber.** Navigate by area:
    a repeated page is `pager_stalled`, ours. Per-portal detail: the `scraper-ops` skill's
    `references/coverage-and-delisting.md`. The detectors that replace the veto are the runner's
    `COVERAGE` warning (logged whenever a walk nominates with `walk_coverage != "complete"`), the
-   facts recorded per category entry in `scrape_runs.by_category` (`walk_reached_end` +
-   `walk_coverage` — JSONB, no migration — and, since Health wave 4, `total_is_count` and
+   facts recorded per category entry in `scrape_runs.by_category` (`walk_reached_end`, the
+   declared total and `collected` — JSONB, no migration; the `walk_coverage` verdict is logged,
+   not stored, since Health wave 9 — and, since Health wave 4, `total_is_count` and
    `declared_is_upper_bound`, the adapter's own word on what its declared total is) and the
    portal checks that read them on the worker (wave 4, `scripts/checks/scraping.py`): the
    `scraping` alarm's walks arm — per unit, the hours since the START of the newest finished
@@ -1312,7 +1312,7 @@ renumber.** Navigate by area:
    `db.mark_listing_inactive(conn, source, native_id)`: keyed on the natural key (migration
    091's UNIQUE `(source, source_id_native)`), guarded `AND is_active = true` so `inactive_at`
    is stamped once per inactive spell (cleared on reactivation; the `delisting` check's outflow
-   arm, the old page's `delisting_latency` matview check and the collection monitor's `inactive`
+   arm and the collection monitor's `inactive`
    event read it), dirty-marking the property
    (rule #20) and clearing sreality's failure row (rule #5), in one transaction. It returns
    None when no row has the key, and the drain logs `gone flip matched no listing`: INFO for
@@ -2618,7 +2618,7 @@ renumber.** Navigate by area:
     interval 0 = off) and an `unalerted` cell (an alarm cell measured failing now and two cadences
     ago with no open incident); a subject that stops failing reads `ok` while its incident is open,
     so it recovers on a measured OK. It replaced the `worker_liveness` check and migration 274's 24 h
-    dead-man job (`emit-verification-stale-alert`, unscheduled by 620; its function goes in 624). **The
+    dead-man job (`emit-verification-stale-alert`, unscheduled by 620; its function went in 642). **The
     canary** is the ONE monitoring workflow, `verify_pipeline.yml` (cron hourly; GitHub delivers
     about five runs a day): it records every other workflow's production runs (the poller: event
     `schedule`, or `push` on `main`; each red with its reason line, judged by the `jobs` check as a
@@ -3135,7 +3135,8 @@ renumber.** Navigate by area:
     It replaced `verify_pipeline`'s `delist_flip_refused`, the table's one reader (an Actions log
     expires, and a signal nothing can query is a signal nobody receives), so
     `delist_flip_refusals` is still written by `db.enqueue_presence_checks` and read by nothing
-    since; a wave-9 drop removes the writer first. There is no latch: the next walk re-nominates
+    since; Health wave 9 did not drop it (still written): the scraper track owns it. There is no
+    latch: the next walk re-nominates
     what was deferred, so a real backlog drains in a few walks. The same check's precision arm watches
     the hysteresis itself: per portal, of a day of `flipped` ledger rows from 2 × its p90 walk
     gap + 1 h old, the share whose ad is active again — a revival the walks see that soon is a
@@ -4875,17 +4876,14 @@ entirely for 3.5 h with no run row and no log line. A starved job looks exactly 
   it). With it `listings.raw_json`, the content-hash substrate (rule 2) and the resolver's evidence,
   so the legacy place keys live there as history forever.
 * `listings_public` is **44 columns — exactly its readers** (W6-c, migration 517): the SPA's
-  `DETAIL_COLS` listing-detail select, of which `api/notifications.py` reads 15, `api/curation.py` 2
-  and the five dependent matviews 8. W4-c had left it 61 wide because a matview's dependency is on
-  the VIEW, not on its columns, so `create or replace` (append-only) was the only shape available;
-  517 takes the width **blue-green** — rename the wide view aside, create the narrow one under the
-  original name, rebuild each matview beside itself and swap it in under a 5s `lock_timeout` — so
-  neither the detail read nor the Health dashboard is ever without a relation. The 17 that went had
-  no reader anywhere: four typed-NULL placeholders, the ten legacy place columns `display_label`
-  replaced, `broker_name`, and the two condition levels (Browse read them off `browse_list`
-  until condition scoring was parked, rule #14).
-  `portal_listing_counts` stays 8 wide and that is the census result, not a deferral: all eight are
-  read by `portal_health_mv`, so it is already minimal.
+  `DETAIL_COLS` listing-detail select, of which `api/notifications.py` reads 15 and `api/curation.py` 2.
+  W4-c had left it 61 wide because five health matviews depended on the VIEW, not on its columns, so
+  `create or replace` (append-only) was the only shape available; 517 took the width **blue-green**
+  (rename the wide view aside, create the narrow one, rebuild each matview beside itself, swap under a
+  5s `lock_timeout`). Migration 642 dropped those matviews and `portal_listing_counts`, so no view or
+  matview depends on `listings_public` now. The 17 that went had no reader anywhere: four typed-NULL
+  placeholders, the ten legacy place columns `display_label` replaced, `broker_name`, and the two
+  condition levels (Browse read them off `browse_list` until condition scoring was parked, rule #14).
 * `ScrapedListing` keeps `locality`, `district`, `street`, `house_number`, `zip`, `lat`, `lon` —
   `locality` and `district` are content-hash inputs, so removing them would churn a snapshot for
   every listing in the corpus (rule 2), and all seven are the parser's reading of the page, which is

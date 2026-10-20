@@ -1631,9 +1631,9 @@ def sweep_stuck_scrape_runs(
     """Finalize scrape_runs hard-killed before scrape_run_finalize ran.
 
     A GitHub-Actions job killed at the job timeout (SIGKILL) can't write
-    ended_at, so the row stays orphaned and the Health 'runs finishing
-    cleanly' check counts it 'stuck'. Stamp ended_at so a hard-kill self-heals
-    on the next API boot. Counters are left as-is on purpose: the index walk
+    ended_at; stamp it on the next API boot so no row stays open forever. The
+    row keeps by_category = '[]', so no health check ever counts it as a
+    finished walk. Counters are left as-is on purpose: the index walk
     (bump_index_pages) and the detail-drain (bump_scrape_run_counts) persist their
     counts incrementally as they go, so a swept row already carries the real
     totals of whatever committed before the kill. The cutoff must stay above the
@@ -1642,9 +1642,9 @@ def sweep_stuck_scrape_runs(
     22-scope walk is ~85-90 min), so this 90-minute default is only safe for the
     lanes that finish inside it. The API's boot sweep passes an explicit cutoff
     above them all (api/main.py): falsely stamping ended_at on an in-flight walk
-    makes verify_pipeline read it as a truncated run (by_category is NOT NULL
-    DEFAULT '[]', so it cannot be filtered out) and leaves a later crash invisible,
-    since _record_run_crash never clears an ended_at the sweep already wrote.
+    breaks run_phase's contract (ended_at means the phase completed), and the
+    walk's own later crash cannot take the stamp back, since _record_run_crash
+    never clears an ended_at the sweep already wrote.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(

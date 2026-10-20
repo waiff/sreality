@@ -175,11 +175,12 @@ def test_index_walk_nominates_unseen_rows_when_the_walk_reached_the_portals_end(
     assert sum(c["listings_to_verify"] for c in agg["by_category"]) == 4
     assert agg["listings_scraped_new"] == 0
     assert p.conn.closed
-    # both verdicts land in scrape_runs.by_category (JSONB, no migration); the orphans last
-    assert [(c["category_main"], c["walk_reached_end"], c["walk_coverage"])
-            for c in agg["by_category"]] == [
-        ("A", True, "complete"), ("B", True, "complete"), (None, True, "complete"),
+    # the structural verdict lands in scrape_runs.by_category, the orphans last; the numeric one
+    # is only logged
+    assert [(c["category_main"], c["walk_reached_end"]) for c in agg["by_category"]] == [
+        ("A", True), ("B", True), (None, True),
     ]
+    assert not any({"walk_coverage", "active_db"} & c.keys() for c in agg["by_category"])
 
 
 def test_index_walk_nominates_nothing_when_our_own_stop_fired(monkeypatch):
@@ -191,25 +192,24 @@ def test_index_walk_nominates_nothing_when_our_own_stop_fired(monkeypatch):
     p = _FakePortal(reached_end=False)
     _rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert cap["candidates"] == [] and cap["queued"] == []
-    assert [(c["walk_reached_end"], c["walk_coverage"]) for c in agg["by_category"]] == [
-        (False, "complete"), (False, "complete"),
-    ]
+    assert [(c["walk_reached_end"], c["collected"], c[portal_runner.DECLARED_TOTAL_KEY])
+            for c in agg["by_category"]] == [(False, 2, 2), (False, 2, 2)]
 
 
 def test_index_walk_nominates_a_short_count_and_alarms_on_it(monkeypatch, caplog):
     """The motivating case (ceskereality houses-for-sale, 20,964 rows): every
     unit paged to its own last page while the declared totals add up short. The
-    numeric verdict is `incomplete` and must NOT veto -- it is logged, recorded,
-    and the gap is nominated so the page decides."""
+    numeric verdict is `incomplete` and must NOT veto -- it is logged, and the
+    gap is nominated so the page decides."""
     cap = _nominations(monkeypatch)
     p = _FakePortal(categories=["A"], reached_end=True, result_size=87)
     with caplog.at_level("WARNING"):
         _rc, agg = portal_runner.run_index_walk(p, dry_run=False)
     assert [c for c, _, _ in cap["queued"]] == ["A"]
     assert agg["by_category"][0]["walk_reached_end"] is True
-    assert agg["by_category"][0]["walk_coverage"] == "incomplete"
     line = [m for m in caplog.messages if m.startswith("COVERAGE cm=A")]
     assert len(line) == 1
+    assert "(coverage=incomplete)" in line[0]
     assert "the gap is nominated" in line[0]
 
 
@@ -303,7 +303,7 @@ def test_an_indexless_portals_ads_are_all_orphans_of_its_empty_walk(monkeypatch,
     assert cap["orphans"] == [([], None)]
     assert cap["queued"] == [(None, ["https://a.example/1"], 1)]
     assert cap["scopes"] == [(None, "", None)]
-    assert agg["by_category"][0]["walk_coverage"] == "complete"
+    assert agg["by_category"][0]["walk_reached_end"] is True
     assert not [r for r in caplog.records if "VERIFY skipped" in r.getMessage()]
     assert not [r for r in caplog.records if r.getMessage().startswith("COVERAGE")]
 
@@ -423,9 +423,9 @@ def test_a_whole_end_reached_walk_nominates_the_ads_no_unit_covers(monkeypatch, 
     # checks that sum `verify_deferred` and age a unit's end-reached walks see the orphans too.
     orphans = agg["by_category"][-1]
     assert (orphans["category_main"], orphans["category_type"], orphans["walk_reached_end"],
-            orphans["listings_to_verify"], orphans["verify_deferred"], orphans["active_db"],
+            orphans["listings_to_verify"], orphans["verify_deferred"],
             orphans[portal_runner.DECLARED_TOTAL_KEY], orphans["collected"]) == (
-        None, None, True, 1, 0, 3, 0, 0)
+        None, None, True, 1, 0, 0, 0)
     assert set(orphans) == set(agg["by_category"][0])
     assert sum(c["listings_to_verify"] for c in agg["by_category"]) == 5
 
@@ -443,9 +443,9 @@ def test_a_failed_orphan_query_is_an_error_and_an_entry_short_of_the_end(monkeyp
         rc, agg = portal_runner.run_index_walk(_FakePortal(reached_end=True), dry_run=False)
     assert rc == 0 and agg["errors"] == 1
     orphans = agg["by_category"][-1]
-    assert (orphans["category_main"], orphans["walk_reached_end"], orphans["walk_coverage"],
+    assert (orphans["category_main"], orphans["walk_reached_end"],
             orphans[portal_runner.DECLARED_TOTAL_KEY], orphans["listings_to_verify"]) == (
-        None, False, "unknown", None, 0)
+        None, False, None, 0)
     assert any(m.startswith("VERIFY orphans failed") for m in caplog.messages)
 
 
@@ -569,7 +569,8 @@ def test_every_by_category_entry_says_how_its_declared_total_reads(monkeypatch):
     saw) and declared_is_upper_bound. A portal that declares neither, as these fakes, says False."""
     _nominations(monkeypatch)
     _rc, agg = portal_runner.run_index_walk(_FakePortal(result_size=87), dry_run=False)
-    assert portal_runner.DECLARED_TOTAL_KEY == "sreality_result_size"  # read by matviews 233/354
+    # scripts/checks/scraping.py reads every stored walk's declared total under this name
+    assert portal_runner.DECLARED_TOTAL_KEY == "sreality_result_size"
     assert [(c[portal_runner.DECLARED_TOTAL_KEY], c["total_is_count"],
              c["declared_is_upper_bound"]) for c in agg["by_category"]] == [
         (87, False, False), (87, False, False), (0, False, False)]   # the orphans declare 0
