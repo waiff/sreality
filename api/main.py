@@ -58,7 +58,6 @@ from api.estimation_runs import (
     sweep_stuck_runs,
     update_scenario,
 )
-from api import notifications as nf_module
 from api import system_alerts_loop
 from api.labeling import router as labeling_router
 from api.portal_lookup import lookup_portal_listings
@@ -113,7 +112,7 @@ from toolkit.summaries import SummarizeError
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
-    """Spawn the Watchdog matcher and the system-alerts loops alongside the request handler.
+    """Spawn the system-alerts loop (the health teller) alongside the request handler.
 
     On startup we also sweep any estimation_runs / building_runs left
     in a non-terminal status by a server crash mid-background-task,
@@ -123,17 +122,15 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
     timeout (which can't self-finalize) are likewise stamped with an
     ended_at so they stop reading as 'stuck' on the Health page.
 
-    The matcher loop opens its own per-pass DB connection and respects the
-    `notifications_matcher_interval_seconds` knob in `app_settings`.
-    Setting that key to 0 keeps the task alive but idle, so an
-    operator can disable matching without redeploying.
-
     The system-alerts loop (api/system_alerts_loop.py) runs the health
-    ladder every minute on its own connection; it has no knob.
+    ladder every minute on its own connection; it has no knob. It is the
+    API's only background loop: the notification producers run on the
+    realtime worker's `notifications` lane alone (notifications push W2b),
+    and the teller stays here so a dead worker cannot silence its own alarms.
 
-    Both are disabled entirely when the env var `NOTIFICATIONS_MATCHER_DISABLED`
-    is set — useful for tests / one-off CLI invocations that import
-    api.main but don't want a background task chattering.
+    It is disabled when the env var `HEALTH_TELLER_DISABLED` is set —
+    useful for tests / one-off CLI invocations that import api.main but
+    don't want a background task chattering.
     """
     if not os.environ.get("STUCK_ROW_SWEEP_DISABLED"):
         try:
@@ -171,10 +168,7 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
 
     stop_event: asyncio.Event = asyncio.Event()
     tasks: list[asyncio.Task[None]] = []
-    if not os.environ.get("NOTIFICATIONS_MATCHER_DISABLED"):
-        tasks.append(asyncio.create_task(
-            nf_module.matcher_loop(stop_event), name="notifications-matcher",
-        ))
+    if not os.environ.get("HEALTH_TELLER_DISABLED"):
         tasks.append(asyncio.create_task(
             system_alerts_loop.system_alerts_loop(stop_event), name="system-alerts",
         ))

@@ -128,8 +128,7 @@ matcher-loop pattern of api/notifications):
              7 days, for watchdogs and monitored collections) and monitor (a monitored
              property gone for a day, back, or on a new portal). Each step its own
              connection and transaction; a failing step is its own `portal_errors` cell.
-             Beside the API's matcher_loop until W2b; the one identity index
-             (migration 653) makes the overlap a union.
+             The producers' one clock: the API runs none since W2b.
 - push:      every PUSH_TICK_SECONDS (15, a constant), one pass of the push ledger
              (api/push_delivery.deliver_once, notifications push W4): fan out every
              VISIBLE unseen event of the last 24 h to the live devices its account
@@ -568,9 +567,9 @@ _HEALTH_PRUNED_AT: float | None = None
 # per statement (one watchdog's INSERT, one monitor detector: api/notifications._commit_one, under a
 # 120 s SET LOCAL bound), so the locks an INSERT takes never outlive it and a step that raises stops
 # only itself; its error is a `portal_errors` entry, which the jobs check renders as the cell
-# `lane/notifications/<step>`, and the step's next clean pass clears it. Until W2b the API's
-# matcher_loop runs the same three producers beside this lane: both conflict on the one identity
-# index, so the overlap is a union, never a duplicate.
+# `lane/notifications/<step>`, and the step's next clean pass clears it. Their only caller since W2b
+# deleted the API's matcher_loop; a deploy overlap's two workers conflict on the one identity index,
+# so the overlap is a union, never a duplicate.
 NOTIFICATIONS_TICK_SECONDS = 300.0
 # step -> the api.notifications producer it runs (looked up at pass time: the module is lazy-imported).
 NOTIFICATIONS_STEPS: dict[str, str] = {
@@ -2986,7 +2985,7 @@ async def _lane_loop(
 ) -> None:
     """One forever-lane: re-read the interval each pass (live app_settings
     edits apply on the next wake), interval<=0 = idle-not-dead, per-pass
-    try/except, clean stop_event exit. Mirrors notifications.matcher_loop."""
+    try/except, clean stop_event exit."""
     LOG.info("%s lane starting", name)
     if first_delay_seconds > 0:
         # A lane that ticks once a day (location_refetch) does not run its pass in the

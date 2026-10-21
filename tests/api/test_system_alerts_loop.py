@@ -1,5 +1,5 @@
 """The API's system-alerts loop: one ladder pass a minute on its own connection, a failed
-pass logged and survived, started beside the matcher under the matcher's own guard."""
+pass logged and survived, and the API's only background loop, under its own guard."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ pytest.importorskip("fastapi")
 
 from api import dependencies as deps
 from api import main as api_main
-from api import notifications as nf_module
 from api import system_alerts_loop as loop
 from toolkit import system_alerts
 
@@ -84,19 +83,20 @@ def test_the_loop_passes_at_once_then_every_interval_until_stopped(monkeypatch) 
     assert len(passes) == 3
 
 
-def test_the_teller_starts_beside_the_matcher_and_the_test_guard_keeps_it_off(monkeypatch) -> None:
+def test_the_teller_is_the_apis_only_loop_and_its_guard_keeps_it_off(monkeypatch) -> None:
+    """The notification producers run on the worker's lane alone (W2b): the lifespan starts
+    the teller and nothing else, and HEALTH_TELLER_DISABLED (the suite's default) starts none."""
     async def idle(stop_event: asyncio.Event) -> None:
         await stop_event.wait()
 
-    monkeypatch.setattr(nf_module, "matcher_loop", idle)
     monkeypatch.setattr(loop, "system_alerts_loop", idle)
     monkeypatch.setenv("STUCK_ROW_SWEEP_DISABLED", "1")
 
     async def started_tasks() -> set[str]:
         async with api_main._lifespan(api_main.app):
-            return {t.get_name() for t in asyncio.all_tasks()}
+            return {t.get_name() for t in asyncio.all_tasks()} - {asyncio.current_task().get_name()}
 
-    monkeypatch.setenv("NOTIFICATIONS_MATCHER_DISABLED", "1")
-    assert not {"notifications-matcher", "system-alerts"} & asyncio.run(started_tasks())
-    monkeypatch.delenv("NOTIFICATIONS_MATCHER_DISABLED")
-    assert {"notifications-matcher", "system-alerts"} <= asyncio.run(started_tasks())
+    monkeypatch.setenv("HEALTH_TELLER_DISABLED", "1")
+    assert asyncio.run(started_tasks()) == set()
+    monkeypatch.delenv("HEALTH_TELLER_DISABLED")
+    assert asyncio.run(started_tasks()) == {"system-alerts"}
