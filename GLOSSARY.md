@@ -336,8 +336,9 @@ _Avoid_: outage, issue, ticket, problem (for the record)
 
 **System alert**:
 A notice about the platform's own health: an incident has started, is still open, or has recovered.
-Since 2026-10-21 it reaches no notification feed: the Health page shows the incident, and the canary's
-failure email tells an unacknowledged alarm; a watchdog's notice about properties is not one.
+Since 2026-10-21 it reaches no notification feed (its old feed rows were deleted after a backup): the
+Health page shows the incident, and the canary's failure email tells an unacknowledged alarm; a
+watchdog's notice about properties is not one.
 _Avoid_: alarm (that is the check), alert (alone), health notification
 
 **Acknowledge**:

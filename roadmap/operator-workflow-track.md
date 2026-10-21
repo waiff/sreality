@@ -55,10 +55,24 @@ account's iPhones (the installed PWA). Channels: the in-app feed, iPhone push, e
       (was `NOTIFICATIONS_MATCHER_DISABLED`, no alias); migration 655 = Migration B (`health_liveness()` without its
       `api` lease cell, an open `api` incident recovers); the jobs check reads a registered lane missing from the
       heartbeat as Watch, then Problem. Gate: Railway API + worker success, no matcher log lines; over 7 days inactive
-      and reactivated ~60% down, new ≥ the replay. For W6: the lease table and six settings rows are read by nothing.
-- [ ] **Next:** W2b merges after the 48 h overlap (migration 655 first) · W6 the one destructive prune, backup
-      first (R8; drops `dedupe_key`, its UNIQUE, `trigger_snapshot_id`, `notification_matcher_lease` and the matcher's
-      settings rows) · the on-device proof of W5 (your iPhone, a second account; after the VAPID key).
+      and reactivated ~60% down, new ≥ the replay. The lease table and six settings rows are read by nothing (W6 drops them).
+- [ ] **W6 (built 2026-10-21, stacked on W2b; the program is delivered once migration 656 is applied)** — the one
+      destructive prune (R8), migration 656 = Migration E: a `$pre$` that refuses while W2a/W2b are not deployed (no
+      `notifications` lane in the heartbeat, the lease renewed in 20 min), 653/654 are missing, or any function body or
+      catalog dependent names a dropped object; R2 (b)'s system_health rows deleted (~906 on 2026-10-21); the account
+      trigger's SYSTEM branch and the CHECKs narrowed (three producers, nine kinds); `notification_dispatches` 24 -> 15
+      columns (`dedupe_key` + UNIQUE, `trigger_snapshot_id`, `channel`, `status`, `error_message`, `target_channels`,
+      `sreality_id`, `estimation_run_id`, `message`) and the four replaced indexes; `channels` and the cursor on
+      watchdogs, `notify_channels` on collections; `channel_sends`, `notification_suppression`,
+      `resend_webhook_events`, `notification_matcher_lease`, `emit_verification_stale_alert()`, the nine settings rows
+      (copied to `app_settings_history` first). Code: the bell's share sentence from `actor_email` / `share_name` /
+      `share_mode` (it still read `message`), shares write no text, `R2_CARRIERS` loses the dispatch carrier.
+      **Operator:** after W2b AND this PR are merged and deployed (656 applies after its merge: the old API still reads
+      `message`), run `backup_before_drop.yml` (PR body), read the counts back, say "yes, apply it", then
+      `apply_migration.yml` with `656_notifications_w6_prune.sql`. Gate: `$post$` green, drift check green,
+      feed and bell load, gauge review recorded.
+- [ ] **Next:** W2b merges after the 48 h overlap (migration 655 first) · W6 after W2b (backup, then your
+      "yes, apply it") · the on-device proof of W5 (your iPhone, a second account; after the VAPID key).
 
 ### Phase U-NEW-PROPERTY: a property from a pasted ad link (in progress, 2026-10-20)
 
@@ -216,7 +230,7 @@ status=inactive filter at merge time. AUTODEDUP confirmed (2026-10-20) that all 
   identity change; migration 613 drops `legacy_backfill_claim` (operator ruling 2026-10-17).
 - **Next (unscheduled):** ~~`notification_dispatches` needs a column-level UPDATE grant (its global `dedupe_key` is
   browser-writable)~~ stale: 619 narrowed the browser's UPDATE to columns and 651 to `seen_at` alone; the global
-  `dedupe_key` itself is replaced in W3 (Phase U-NOTIFY-PUSH: nothing writes it since migration 653; W6 drops it). The 60 pre-299 public sequences still grant `authenticated` setval (one revoke migration + a
+  `dedupe_key` itself is replaced in W3 (Phase U-NOTIFY-PUSH: nothing writes it since migration 653; migration 656 drops it). The 60 pre-299 public sequences still grant `authenticated` setval (one revoke migration + a
   census arm).
 
 ### Phase U-LINK: Artifact link on the property (done, 2026-10-14)
