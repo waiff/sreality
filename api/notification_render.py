@@ -2,7 +2,7 @@
 
 Read from the event's frozen columns (`trigger_price_czk`, `prev_price_czk`), its property's place label and its ad's
 kind and disposition: never a live price, never a per-m² figure (rule 23), and for a share no sender, no URL and no
-name (F17). The bell keeps its English labels (frontend/src/pages/Notifications.tsx CHANGE_META); the two maps share
+name (F17). The bell keeps its English labels (frontend/src/pages/Notifications.tsx CHANGE_META); the two maps ARE
 the change_kind CHECK's vocabulary by key, pinned by tests/api/test_notification_render.py.
 """
 
@@ -31,9 +31,8 @@ TITLES: dict[str, str] = {
 SHARED_BODIES: dict[str, str] = {
     "shared_collection": "Sbírka", "shared_dashboard": "Dashboard", "shared_pipeline": "Pipeline",
 }
-# The CHECK's values no producer writes (W6 narrows the CHECK): a system alert reaches no device (R2b), 'shared'
-# was relabelled by 652/653 and 'broker_change' was never emitted. One still renders, as sw.js's fallback does.
-NOT_PUSHED: frozenset[str] = frozenset({"system_alert", "shared", "broker_change"})
+# A kind outside TITLES (none since migration 656 narrowed the CHECK to TITLES' keys) still renders, as sw.js's
+# fallback does.
 FALLBACK_TITLE = "Nové upozornění"
 _MONTHLY = "za mesic"
 

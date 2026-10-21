@@ -30,9 +30,11 @@ const baseDispatch: WatchdogDispatch = {
   collection_name: null,
   property_id: 999,
   change_kind: 'new',
-  message: null,
   share_kind: null,
   share_ref: null,
+  actor_email: null,
+  share_name: null,
+  share_mode: null,
   dispatched_at: '2026-05-12T10:00:00+00:00',
   seen_at: null,
   trigger_price_czk: null,
@@ -58,7 +60,8 @@ const share: WatchdogDispatch = {
   id: 'd4',
   source_kind: 'share',
   change_kind: 'shared_collection',
-  message: 'owner@example.com shared the collection "Vinohrady" with you',
+  actor_email: 'owner@example.com',
+  share_name: 'Vinohrady',
   subscription_id: null,
   subscription_name: null,
   collection_id: 42,
@@ -180,7 +183,7 @@ describe('<Notifications> source tabs', () => {
 });
 
 describe('<Notifications> share rows', () => {
-  it('shows the message and links to the shared collection', () => {
+  it('shows the sentence and links to the shared collection', () => {
     renderPage();
     const text = screen.getByRole('button', { name: /^Shared collection owner@example\.com shared the collection "Vinohrady"/ });
     expect(text).toHaveAccessibleDescription('unread');
@@ -199,7 +202,8 @@ describe('<Notifications> share rows', () => {
     const pipelineShare = {
       ...share,
       id: 'd5',
-      message: 'owner@example.com shared their pipeline with you (edit)',
+      share_name: null,
+      share_mode: 'edit' as const,
       collection_id: null,
       collection_name: null,
       change_kind: 'shared_pipeline' as const,
@@ -221,7 +225,7 @@ describe('<Notifications> share rows', () => {
     const dashboardShare = {
       ...share,
       id: 'd6',
-      message: 'owner@example.com shared the dashboard "Ceny Praha" with you',
+      share_name: 'Ceny Praha',
       collection_id: null,
       collection_name: null,
       change_kind: 'shared_dashboard' as const,
@@ -240,9 +244,17 @@ describe('<Notifications> share rows', () => {
   });
 
   it('renders a share it cannot open as text alone, with no link', () => {
-    renderPage({ ...feed, data: [{ ...share, share_kind: null, share_ref: null, message: null }], total: 1 });
+    renderPage({ ...feed, data: [{ ...share, share_kind: null, share_ref: null }], total: 1 });
     expect(screen.getByRole('button', { name: /^Shared collection Something was shared with you\./ })).toBeInTheDocument();
     expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  /* R11: no text is stored (migration 656), so once the share ends the API sends
+   * neither the sharer's address nor the collection's name, and the row says so. */
+  it('names neither the sharer nor the collection once the share has ended', () => {
+    renderPage({ ...feed, data: [{ ...share, actor_email: null, share_name: null }], total: 1 });
+    expect(screen.getByRole('button', { name: /^Shared collection Someone shared a collection with you/ })).toBeInTheDocument();
+    expect(screen.queryByText(/owner@example\.com/)).toBeNull();
   });
 
   it('nests no control inside another', () => {

@@ -9,16 +9,6 @@ from scripts.backfill_child_listing_ids import _predicate
 from toolkit.listing_identity import R2_CARRIERS, R2_CARRIERS_BY_TABLE
 
 
-def test_notification_dispatches_skips_system_health_rows() -> None:
-    """A system_health bell row anchors on no listing by construction
-    (notification_dispatches_source_ck), so the backfill skips it whatever its columns hold."""
-    carrier = R2_CARRIERS_BY_TABLE["notification_dispatches"]
-    assert carrier["skip"] == "t.source_kind = 'system_health'"
-    for repair in (False, True):
-        assert "NOT (t.source_kind = 'system_health')" in _predicate(
-            "listing_id", "sreality_id", repair, carrier["skip"])
-
-
 def test_properties_skips_a_property_reset_to_no_ads() -> None:
     """The recompute resets a property whose ads all moved away: both ids NULL and a count of 0,
     which only that reset writes. It names no advert on purpose; the skip names exactly it."""

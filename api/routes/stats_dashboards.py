@@ -92,8 +92,8 @@ def share_dashboard(
     body: s.ShareDashboardIn,
 ) -> dict[str, Any]:
     """Share one named dashboard read-only with the account behind a confirmed email (owner only)."""
-    name = shares.owner_gate(conn, _SHARE_GATE_SQL, dashboard_id, "dashboard")
-    shares.grant(open_identity_conn, body.email, shares.DashboardShare(dashboard_id, name))
+    shares.owner_gate(conn, _SHARE_GATE_SQL, dashboard_id, "dashboard")
+    shares.grant(open_identity_conn, body.email, shares.DashboardShare(dashboard_id))
     return saved_sets.row_or_404(DASHBOARDS, saved_sets.get(conn, DASHBOARDS, str(dashboard_id)))
 
 

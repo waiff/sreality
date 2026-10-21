@@ -1,5 +1,5 @@
-"""api/notification_render.py, hermetic: one Czech label per change_kind the CHECK allows (the never-pushed ones
-named), the same keys as the bell's English map, the frozen prices only, no per-m² figure and nothing of a sharer."""
+"""api/notification_render.py, hermetic: one Czech label per change_kind the CHECK allows, the same keys as the
+bell's English map, the frozen prices only, no per-m² figure and nothing of a sharer."""
 
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ def _check_values() -> set[str]:
     return set(re.findall(r"'(\w+)'", check))
 
 
-def test_every_check_value_has_one_label_or_is_named_never_pushed() -> None:
+def test_every_check_value_has_one_label_and_every_label_one_value() -> None:
+    """Migration 656 narrowed the CHECK to the nine kinds the producers write, so no value is never pushed."""
     allowed = _check_values()
-    assert set(nr.TITLES) | nr.NOT_PUSHED == allowed
-    assert not set(nr.TITLES) & nr.NOT_PUSHED
+    assert set(nr.TITLES) == allowed
     assert set(nr.SHARED_BODIES) == {k for k in allowed if k.startswith("shared_")}
 
 
@@ -60,11 +60,11 @@ def test_the_bells_english_map_has_the_same_keys() -> None:
     ({"change_kind": "new", "display_label": "Ostrava"}, "Nový inzerát · Ostrava", ""),
     ({"change_kind": "price_drop", "display_label": "Kolín", "trigger_price_czk": 4_200_000, "category_main": "byt"},
      "Zlevněno · Kolín", "Byt"),
-    ({"change_kind": "shared_collection", "display_label": "Praha", "message": "a@b.cz shared \"x\" with you"},
+    ({"change_kind": "shared_collection", "display_label": "Praha", "actor_email": "a@b.cz", "share_name": "x"},
      "Sdíleno s vámi", "Sbírka"),
     ({"change_kind": "shared_dashboard"}, "Sdíleno s vámi", "Dashboard"),
     ({"change_kind": "shared_pipeline", "actor_email": "owner@x.cz"}, "Sdíleno s vámi", "Pipeline"),
-    ({"change_kind": "system_alert"}, "Nové upozornění", ""),
+    ({"change_kind": "unknown_kind"}, "Nové upozornění", ""),
     ({}, "Nové upozornění", ""),
 ], ids=lambda v: v.get("change_kind", "none") if isinstance(v, dict) else None)
 def test_each_kind_renders_from_the_frozen_columns(row: dict, title: str, body: str) -> None:
@@ -73,7 +73,8 @@ def test_each_kind_renders_from_the_frozen_columns(row: dict, title: str, body: 
 
 def test_no_text_carries_a_per_m2_figure_a_sender_or_a_url() -> None:
     rows = [{"change_kind": kind, "display_label": "Praha", "category_main": "byt", "disposition": "2+kk",
-             "trigger_price_czk": 5_000_000, "prev_price_czk": 5_500_000, "message": "x@y.cz https://evil",
+             "trigger_price_czk": 5_000_000, "prev_price_czk": 5_500_000, "actor_email": "x@y.cz",
+             "share_name": "https://evil",
              "price_per_m2": 91_535} for kind in nr.TITLES]
     for row in rows:
         out = nr.render(row)

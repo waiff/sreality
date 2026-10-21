@@ -1394,81 +1394,88 @@ def test_an_admin_reads_the_registry_view_as_the_caller(
                 assert cur.fetchone() == ("ok", "ok", True, [])
 
 
-# Migration 364 stamps every system_health dispatch to the SYSTEM account (account_id is NOT
-# NULL), and no tenant is a member of it, so no tenant arm reaches one; since migration 651 no
-# admin arm does either (system alerts left the bell, ruling R2).
-_SYSTEM_ACCOUNT = uuid.UUID("00000000-0000-0000-0000-000000000000")
-
-
+# System alerts are no producer since migration 656 deleted their history (ruling R2 (b)): the
+# account trigger raises for any source but the three, so every dispatch is an account's own and a
+# reader, a platform admin included, sees and marks its own account's rows only (migration 651).
 @pytest.fixture(scope="module")
 def seeded_dispatches(
     svc: Any, tenants: dict[str, uuid.UUID],
 ) -> "Iterator[dict[str, Any]]":
-    """One system alert and one of tenant B's own collection_monitor dispatches, each stamped
-    by the dispatch trigger. Seeded as svc; B's row goes with its collection."""
+    """One collection_monitor dispatch of tenant A's and one of tenant B's, each stamped by the
+    dispatch trigger. Seeded as svc; each row goes with its collection."""
     nonce = uuid.uuid4().hex[:12]
-    alert = {"message": f"iso alert {nonce}", "dedupe_key": f"sys:iso:{nonce}"}
+    rows: dict[str, Any] = {}
+    colls: list[int] = []
     with svc.cursor() as cur:
-        cur.execute(
-            "INSERT INTO notification_dispatches (source_kind, change_kind, message, dedupe_key) "
-            "VALUES ('system_health', 'system_alert', %s, %s) RETURNING id, account_id",
-            (alert["message"], alert["dedupe_key"]),
-        )
-        system_id, system_account = cur.fetchone()
-        cur.execute(
-            "INSERT INTO collections (account_id, name) VALUES (%s, %s) RETURNING id",
-            (tenants["b_acc"], f"iso-{nonce}"),
-        )
-        coll = cur.fetchone()[0]
-        cur.execute(
-            "INSERT INTO notification_dispatches (source_kind, collection_id, change_kind, dedupe_key) "
-            "VALUES ('collection_monitor', %s, 'new', %s) RETURNING id",
-            (coll, f"iso:{nonce}"),
-        )
-        own_id = cur.fetchone()[0]
+        for side in ("a", "b"):
+            cur.execute(
+                "INSERT INTO collections (account_id, name) VALUES (%s, %s) RETURNING id",
+                (tenants[f"{side}_acc"], f"iso-{side}-{nonce}"),
+            )
+            coll = cur.fetchone()[0]
+            colls.append(coll)
+            cur.execute(
+                "INSERT INTO notification_dispatches (source_kind, collection_id, change_kind, event_ref) "
+                "VALUES ('collection_monitor', %s, 'inactive', %s) RETURNING id, account_id",
+                (coll, nonce),
+            )
+            rows[side], account = cur.fetchone()
+            assert account == tenants[f"{side}_acc"], "the trigger stamps the collection's account"
     try:
-        assert system_account == _SYSTEM_ACCOUNT, "a system alert must be a SYSTEM-account row"
-        yield {"system": system_id, "own": own_id, **alert}
+        yield {**rows, "event_ref": nonce}
     finally:
         with svc.cursor() as cur:
-            cur.execute("DELETE FROM notification_dispatches WHERE id = %s", (system_id,))
-            cur.execute("DELETE FROM collections WHERE id = %s", (coll,))
+            cur.execute("DELETE FROM collections WHERE id = ANY(%s)", (colls,))
 
 
-def test_a_platform_admin_neither_reads_nor_marks_a_system_alert(
+def test_no_producer_writes_a_system_alert(svc: Any) -> None:
+    """Migration 656: the SYSTEM else-branch is gone (anything but the three producers raises) and the
+    CHECKs name three sources and nine kinds. RED by: restoring 641's SYSTEM stamp or 274's arm."""
+    import psycopg
+
+    with svc.transaction():
+        with pytest.raises(psycopg.errors.RaiseException, match="has no producer system_health"):
+            with svc.transaction():
+                with svc.cursor() as cur:
+                    cur.execute("INSERT INTO notification_dispatches (source_kind, change_kind) "
+                                "VALUES ('system_health', 'new')")
+        with pytest.raises(psycopg.errors.CheckViolation, match="notification_dispatches_change_kind_ck"):
+            with svc.transaction():
+                with svc.cursor() as cur:
+                    cur.execute("INSERT INTO notification_dispatches (source_kind, change_kind, account_id) "
+                                "VALUES ('share', 'system_alert', %s)",
+                                (uuid.UUID("00000000-0000-0000-0000-000000000000"),))
+
+
+def test_a_platform_admin_neither_reads_nor_marks_another_accounts_alert(
     svc: Any, tenants: dict[str, uuid.UUID], seeded_dispatches: dict[str, Any],
 ) -> None:
-    """Migration 651: system alerts live on Health, so the bell, the badge and the feed count an
-    account's own rows only, a platform admin's included. The blanket UPDATE reads no column, so
-    the UPDATE policies alone judge it. RED by: restoring tenant_read's SYSTEM arm or
-    notification_dispatches_admin_update."""
+    """Migration 651: the bell, the badge and the feed count an account's own rows only, a platform
+    admin's included. The blanket UPDATE reads no column, so the UPDATE policies alone judge it.
+    RED by: an admin arm on tenant_read or an admin UPDATE policy."""
+    seen_at = "SELECT seen_at FROM notification_dispatches WHERE id = %s"
     with svc.cursor() as cur:
-        cur.execute("SELECT seen_at FROM notification_dispatches WHERE id = %s",
-                    (seeded_dispatches["system"],))
+        cur.execute(seen_at, (seeded_dispatches["b"],))
         before = cur.fetchone()[0]
     with _platform_admin(svc, tenants["a_user"]):
         with scoped(tenants["a_user"]) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT 1 FROM notification_dispatches WHERE id = %s",
-                            (seeded_dispatches["system"],))
-                assert cur.fetchone() is None, "the platform admin still reads a system alert"
+                cur.execute("SELECT 1 FROM notification_dispatches WHERE id = %s", (seeded_dispatches["b"],))
+                assert cur.fetchone() is None, "the platform admin reads another account's alert"
                 cur.execute("UPDATE notification_dispatches SET seen_at = now()")
-                cur.execute(
-                    "UPDATE notification_dispatches SET seen_at = now() WHERE id = %s",
-                    (seeded_dispatches["system"],),
-                )
-                assert cur.rowcount == 0, "the platform admin still marks a system alert read"
+                cur.execute("UPDATE notification_dispatches SET seen_at = now() WHERE id = %s",
+                            (seeded_dispatches["b"],))
+                assert cur.rowcount == 0, "the platform admin marks another account's alert read"
     with svc.cursor() as cur:
-        cur.execute("SELECT seen_at FROM notification_dispatches WHERE id = %s",
-                    (seeded_dispatches["system"],))
+        cur.execute(seen_at, (seeded_dispatches["b"],))
         assert cur.fetchone()[0] == before
 
 
-def test_a_platform_admin_cannot_rewrite_a_system_alert(
+def test_no_browser_caller_rewrites_a_column_but_seen_at(
     svc: Any, tenants: dict[str, uuid.UUID], seeded_dispatches: dict[str, Any],
 ) -> None:
-    """The column grant keeps every column but seen_at out of every browser caller's reach, an
-    admin's included, whichever row a policy would admit.
+    """The column grant keeps every column but seen_at out of every browser caller's reach, on the
+    caller's OWN row, which every policy admits, and for an admin too.
 
     RED by: restoring table-wide UPDATE on notification_dispatches to authenticated."""
     import psycopg
@@ -1476,61 +1483,59 @@ def test_a_platform_admin_cannot_rewrite_a_system_alert(
     with _platform_admin(svc, tenants["a_user"]):
         with scoped(tenants["a_user"]) as conn:
             for sql in (
-                "UPDATE notification_dispatches SET message = 'rewritten' WHERE id = %s",
-                "UPDATE notification_dispatches SET target_channels = '{email}' WHERE id = %s",
-                "UPDATE notification_dispatches SET dedupe_key = 'sys:forged' WHERE id = %s",
-                "UPDATE notification_dispatches SET estimation_run_id = NULL WHERE id = %s",
+                "UPDATE notification_dispatches SET change_kind = 'new' WHERE id = %s",
+                "UPDATE notification_dispatches SET event_ref = 'forged' WHERE id = %s",
+                "UPDATE notification_dispatches SET duplicate_of = id WHERE id = %s",
+                "UPDATE notification_dispatches SET actor_account_id = account_id WHERE id = %s",
             ):
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
                     with conn.transaction():  # a SAVEPOINT, so the refusal cannot poison the txn
                         with conn.cursor() as cur:
-                            cur.execute(sql, (seeded_dispatches["system"],))
+                            cur.execute(sql, (seeded_dispatches["a"],))
     with svc.cursor() as cur:
-        cur.execute(
-            "SELECT message, target_channels, dedupe_key FROM notification_dispatches WHERE id = %s",
-            (seeded_dispatches["system"],),
-        )
-        assert cur.fetchone() == (seeded_dispatches["message"], [], seeded_dispatches["dedupe_key"])
+        cur.execute("SELECT change_kind, event_ref, duplicate_of, actor_account_id "
+                    "FROM notification_dispatches WHERE id = %s", (seeded_dispatches["a"],))
+        assert cur.fetchone() == ("inactive", seeded_dispatches["event_ref"], None, None)
 
 
-def test_a_tenant_cannot_touch_a_system_alert_and_still_marks_its_own_read(
+def test_a_tenant_cannot_touch_another_accounts_alert_and_still_marks_its_own_read(
     svc: Any, tenants: dict[str, uuid.UUID], seeded_dispatches: dict[str, Any],
 ) -> None:
-    """An UPDATE that reads no column (no WHERE, no RETURNING) is judged by the UPDATE
-    policies alone; with a WHERE the read policy, which hides SYSTEM rows from tenants,
-    would mask an UPDATE arm that reaches them. So the blanket statement is the probe.
+    """An UPDATE that reads no column (no WHERE, no RETURNING) is judged by the UPDATE policies
+    alone; with a WHERE the read policy, which hides other accounts' rows, would mask an UPDATE arm
+    that reaches them. So the blanket statement is the probe.
 
-    RED by: an UPDATE arm that reaches SYSTEM rows, a column grant missing seen_at, or one that
-    still carries estimation_run_id (migration 651: its one writer, "Estimate rent", is deleted)."""
+    RED by: an UPDATE arm that reaches another account, or a column grant missing seen_at or
+    carrying any other column."""
     import psycopg
 
     seen_at = "SELECT seen_at FROM notification_dispatches WHERE id = %s"
     with svc.cursor() as cur:
-        cur.execute(seen_at, (seeded_dispatches["system"],))
+        cur.execute(seen_at, (seeded_dispatches["a"],))
         before = cur.fetchone()[0]
     with scoped(tenants["b_user"]) as conn:
         with conn.cursor() as cur:
             cur.execute("UPDATE notification_dispatches SET seen_at = now()")
             cur.execute(
                 "UPDATE notification_dispatches SET seen_at = now() WHERE id = %s",
-                (seeded_dispatches["system"],),
+                (seeded_dispatches["a"],),
             )
-            assert cur.rowcount == 0, "a tenant reached a SYSTEM-account system alert"
+            assert cur.rowcount == 0, "a tenant reached another account's alert"
             cur.execute(
                 "UPDATE notification_dispatches SET seen_at = now() WHERE id = %s",
-                (seeded_dispatches["own"],),
+                (seeded_dispatches["b"],),
             )
             assert cur.rowcount == 1, "a tenant can no longer mark its own notification read"
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             with conn.transaction():  # a SAVEPOINT, so the refusal cannot poison the txn
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE notification_dispatches SET estimation_run_id = NULL WHERE id = %s",
-                        (seeded_dispatches["own"],),
+                        "UPDATE notification_dispatches SET event_ref = NULL WHERE id = %s",
+                        (seeded_dispatches["b"],),
                     )
     with svc.cursor() as cur:
-        cur.execute(seen_at, (seeded_dispatches["system"],))
-        assert cur.fetchone()[0] == before, "a tenant's blanket update reached a system alert"
+        cur.execute(seen_at, (seeded_dispatches["a"],))
+        assert cur.fetchone()[0] == before, "a tenant's blanket update reached another account's alert"
 
 
 def test_no_anon_write_grants(svc: Any) -> None:

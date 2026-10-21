@@ -527,24 +527,37 @@ def test_a_share_notification_is_stamped_to_the_recipient_and_read_by_them_only(
     import psycopg
 
     a, b, c = tenants["a"], tenants["b"], tenants["c"]
-    key = f"share:collection:{world.coll}:{b.acc}"
     with svc.cursor() as cur:
         cur.execute(
             "INSERT INTO notification_dispatches "
-            "(source_kind, collection_id, change_kind, message, account_id, dedupe_key) "
-            "VALUES ('share', %s, 'shared', 'shared with you', %s, %s) "
-            "RETURNING account_id",
-            (world.coll, b.acc, key),
+            "(source_kind, collection_id, change_kind, account_id, actor_account_id) "
+            "VALUES ('share', %s, 'shared_collection', %s, %s) "
+            "RETURNING id, account_id",
+            (world.coll, b.acc, a.acc),
         )
-        assert cur.fetchone()[0] == b.acc
+        did, stamped = cur.fetchone()
+        assert stamped == b.acc
         with pytest.raises(psycopg.errors.RaiseException):
             cur.execute(
                 "INSERT INTO notification_dispatches "
-                "(source_kind, collection_id, change_kind, dedupe_key) "
-                "VALUES ('share', %s, 'shared', %s)",
-                (world.coll, f"{key}:unstamped"),
+                "(source_kind, collection_id, change_kind, event_ref) "
+                "VALUES ('share', %s, 'shared_collection', 'unstamped')",
+                (world.coll,),
             )
-    read = "SELECT account_id FROM notification_dispatches WHERE dedupe_key = %s"
-    assert _rows(b, read, (key,)) == [(b.acc,)]
-    assert _rows(a, read, (key,)) == []
-    assert _rows(c, read, (key,)) == []
+    read = "SELECT account_id FROM notification_dispatches WHERE id = %s"
+    assert _rows(b, read, (did,)) == [(b.acc,)]
+    assert _rows(a, read, (did,)) == []
+    assert _rows(c, read, (did,)) == []
+    # The bell's sentence comes from the actor and the live name (migration 656 dropped `message`),
+    # both read as the recipient: the sharer's email through share_party_emails(), the collection's
+    # name through the share's read policy.
+    from api.notifications import _fetch_dispatch
+
+    with svc.cursor() as cur:
+        cur.execute("SELECT name FROM collections WHERE id = %s", (world.coll,))
+        name = cur.fetchone()[0]
+    with scoped(b.user) as conn:
+        row = _fetch_dispatch(conn, str(did))
+    assert row is not None
+    assert (row["actor_email"], row["share_name"], row["share_kind"], row["share_mode"]) == (
+        a.email, name, "collection", None)

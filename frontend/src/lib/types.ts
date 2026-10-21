@@ -1114,7 +1114,7 @@ export type NotificationSourceKind =
   | 'collection_monitor'
   /* Something was shared with the caller (migrations 610, 641, 647): a collection
    * (collection_id set), a pipeline or a dashboard (collection_id null); change_kind
-   * names which (migration 652), no listing subject — the `message` text. */
+   * names which (migration 652), no listing subject — the sharer and the thing's name. */
   | 'share';
 
 /* Why a dispatch fired: a detector's event, or what a share opens (the change_kind
@@ -1146,15 +1146,19 @@ export interface WatchdogDispatch {
    * decrease). */
   property_id: number | null;
   change_kind: DispatchChangeKind;
-  /* Free-text body of a `share` row (change_kind 'shared_<kind>'), which has no
-   * listing subject; null on watchdog / collection_monitor rows. */
-  message: string | null;
   /* What a `share` row shares: the kind (the API reads it off change_kind,
    * migration 652), and its id off the row's own columns — the collection id, the
    * owner's account uuid for a pipeline (the actor), the dashboard uuid (the
    * event_ref). Null on every other producer. */
   share_kind: 'collection' | 'pipeline' | 'dashboard' | null;
   share_ref: string | null;
+  /* A share stores no text (migration 656): the bell composes its sentence from
+   * the sharer's email (null once no share joins the two accounts), the shared
+   * collection's or dashboard's live name (null once it cannot be read) and a
+   * pipeline share's mode. All three null on every other producer. */
+  actor_email: string | null;
+  share_name: string | null;
+  share_mode: 'read' | 'edit' | null;
   dispatched_at: string;
   seen_at: string | null;
   /* Change provenance — price events carry these so "why was I pinged" survives

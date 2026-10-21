@@ -9,9 +9,10 @@ tests/scripts/test_backfill_child_listing_ids.py.
 
 `legacy` is the column holding the old smart key (`listings.sreality_id`), `new`
 the surrogate (`listings.id`) added by migrations 320-325. `cursor` is a
-monotonic column that windows the backfill; `kind='ts'` marks the two carriers with
-no usable bigint id — notification_dispatches has a uuid PK and
-estimation_cohort_entries has none.
+monotonic column that windows the backfill; `kind='ts'` marks the carrier with no
+usable bigint id, estimation_cohort_entries (it has no PK).
+notification_dispatches left the registry when migration 656 dropped its legacy
+`sreality_id` (every row already held its `listing_id`).
 
 Pair carriers list two column pairs. They are stamped and checked POSITIONALLY:
 `listing_id_a` is the surrogate of `sreality_id_a`. Under the surrogate the
@@ -60,13 +61,6 @@ R2_CARRIERS: list[dict[str, Any]] = [
      "cols": [("input_sreality_id", "input_listing_id")]},
     {"table": "building_runs", "cursor": "id",
      "cols": [("input_sreality_id", "input_listing_id")]},
-    # `system_health` rows are bell alerts, not listing events: the producers
-    # (toolkit/system_alerts.emit_system_alert, mig 274; the ladder since mig 619)
-    # name neither id column, and notification_dispatches_source_ck makes that structural.
-    # Without the skip the backfill would treat every alert as an orphan row to heal.
-    {"table": "notification_dispatches", "cursor": "dispatched_at", "kind": "ts",
-     "cols": [("sreality_id", "listing_id")],
-     "skip": "t.source_kind = 'system_health'"},
     {"table": "estimation_cohort_entries", "cursor": "created_at", "kind": "ts",
      "cols": [("sreality_id", "listing_id")]},
 ]

@@ -307,8 +307,8 @@ def create_share(
     body: s.ShareCollectionIn,
 ) -> dict[str, Any]:
     """Share one collection read-only with the account behind a confirmed email (owner only)."""
-    name = shares.owner_gate(conn, _SHARE_GATE_SQL, collection_id, "collection")
-    shares.grant(open_identity_conn, body.email, shares.CollectionShare(collection_id, name))
+    shares.owner_gate(conn, _SHARE_GATE_SQL, collection_id, "collection")
+    shares.grant(open_identity_conn, body.email, shares.CollectionShare(collection_id))
     coll = _fetch_collection(conn, collection_id)
     if coll is None:
         raise HTTPException(404, "collection not found")

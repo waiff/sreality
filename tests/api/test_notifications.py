@@ -904,10 +904,18 @@ def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
     assert "nd.dispatched_at > m.monitor_since" in reactivated_sql
 
 
-def test_no_producer_writes_routing_or_the_legacy_id() -> None:
-    """Producers write facts (notifications program, north star 1): channel, status and
-    target_channels take their column defaults (migrations 057/206) until W6 drops them,
-    and nothing reads a dispatch's sreality_id any more."""
+# notification_dispatches' columns after migration 656 (its $post$ pins the same 15).
+_DISPATCH_COLUMNS = frozenset({
+    "id", "subscription_id", "collection_id", "source_kind", "property_id", "listing_id", "change_kind",
+    "trigger_price_czk", "prev_price_czk", "dispatched_at", "seen_at", "account_id", "event_ref",
+    "actor_account_id", "duplicate_of"})
+
+
+def test_every_producer_writes_only_the_columns_migration_656_keeps() -> None:
+    """Producers write facts (notifications program, north star 1), never routing, a key, text or
+    the legacy id: every INSERT, the share grant's included, names only the 15 columns migration 656
+    keeps (it dropped channel, status, error_message, target_channels, dedupe_key,
+    trigger_snapshot_id, sreality_id, estimation_run_id and message)."""
     from api import shares
     from api.notifications import match_changes_once
 
@@ -927,7 +935,11 @@ def test_no_producer_writes_routing_or_the_legacy_id() -> None:
     assert len(columns) == 7 and all(columns), statements
     for match in columns:
         named = {c.strip() for c in match.group(1).split(",")}
-        assert not named & {"channel", "status", "target_channels", "sreality_id"}, named
+        assert named <= _DISPATCH_COLUMNS, named - _DISPATCH_COLUMNS
+    from tests.migration_defs import MIGRATIONS
+    post = " ".join((MIGRATIONS / "656_notifications_w6_prune.sql").read_text().split())
+    kept = re.search(r"v_cols is distinct from array\[([^\]]*)\]", post)
+    assert kept and set(re.findall(r"'(\w+)'", kept.group(1))) == _DISPATCH_COLUMNS
 
 
 def test_the_unread_count_is_one_number() -> None:
@@ -939,11 +951,20 @@ def test_the_unread_count_is_one_number() -> None:
     assert "GROUP BY" not in sql and "source_kind" not in sql and params is None
 
 
-def test_dispatch_select_projects_message() -> None:
-    # The feed row carries d.message, the share's sentence.
-    from api.notifications import _DISPATCH_SELECT
+def test_dispatch_select_labels_a_share_from_its_actor_and_live_name_never_stored_text() -> None:
+    """A share stores no text (F17, R11; migration 656 dropped `message`): the feed hands the SPA the
+    sharer's email through share_party_emails(), spelled as api/shares.party_label spells it (NULL
+    once no share joins the two accounts), the shared thing's live name and a pipeline's mode."""
+    from api import shares
+    from api.notifications import _DISPATCH_FROM, _DISPATCH_SELECT
 
-    assert "d.message" in _DISPATCH_SELECT
+    sql = " ".join(_DISPATCH_SELECT.split())
+    assert "message" not in sql and "message" not in _DISPATCH_FROM
+    assert (f"CASE WHEN d.actor_account_id IS NOT NULL THEN {shares.party_label('d.actor_account_id')} "
+            "END AS actor_email") in sql
+    assert ("CASE d.change_kind WHEN 'shared_collection' THEN c.name WHEN 'shared_dashboard' THEN "
+            "(SELECT sd.name FROM stats_dashboards sd WHERE sd.id::text = d.event_ref) END AS share_name") in sql
+    assert "CASE WHEN d.change_kind = 'shared_pipeline' THEN d.event_ref END AS share_mode" in sql
 
 
 def test_dispatch_select_names_what_a_share_opens() -> None:
