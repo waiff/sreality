@@ -1,5 +1,6 @@
 """`health_liveness()`, the pg_cron watcher, writes one `liveness` row of cells (migration 620, its lane cell 621,
-its explicit cells 633). The `migration_633` tests run that file's own unschedule and post-condition (not copies).
+its explicit cells 633, no API cell since 655). The `migration_633` tests run that file's own unschedule and
+post-condition, the `migration_655` tests that file's post-condition (not copies).
 
 Executed against the replayed schema inside a transaction that always rolls back. Runs in CI's migrations
 lane (`TEST_DATABASE_URL`, `DB_RAILS_REQUIRED=1`): the watcher's step, and 633's step for the `migration_633`
@@ -17,6 +18,7 @@ import pytest
 _DB_URL = os.environ.get("TEST_DATABASE_URL")
 _REQUIRED = os.environ.get("DB_RAILS_REQUIRED") == "1"
 _MIGRATION_629 = Path(__file__).resolve().parents[1] / "migrations" / "633_health_explicit_cells.sql"
+_MIGRATION_655 = Path(__file__).resolve().parents[1] / "migrations" / "655_health_liveness_without_api_cell.sql"
 # pg_cron's job table and unschedule(bigint), as the file calls them: the replay has no pg_cron.
 _CRON_STUB = """
 create schema cron;
@@ -48,27 +50,10 @@ def cur():
             c.execute("delete from health_checks")
             c.execute("delete from ops_incidents where signature like 'cell:%'")
             c.execute("delete from worker_heartbeats")
-            _lease(c, "10 minutes")
-            _interval(c, 300)
             yield c
     finally:
         conn.rollback()
         conn.close()
-
-
-def _lease(cur: Any, offset: str | None) -> None:
-    """The matcher lease expiring `offset` from now, or released (NULL) when offset is None."""
-    if offset is None:
-        cur.execute("update notification_matcher_lease set holder = null, expires_at = null where id = 1")
-    else:
-        cur.execute("update notification_matcher_lease set holder = 'matcher:test', "
-                    "expires_at = now() + %s::interval where id = 1", (offset,))
-
-
-def _interval(cur: Any, seconds: int) -> None:
-    """The matcher interval the API reads from app_settings."""
-    cur.execute("insert into app_settings (key, value) values ('notifications_matcher_interval_seconds', %s::jsonb) "
-                "on conflict (key) do update set value = excluded.value", (str(seconds),))
 
 
 def _beat(cur: Any, worker: str, age: str) -> None:
@@ -142,7 +127,6 @@ def test_each_dead_watcher_fails_one_cell(cur):
     _result(cur, "aaa_stale", "ok", "20 hours")
     _check(cur, "bbb_untold")
     _result(cur, "bbb_untold", "fail", "3 hours", [{"subject": "sreality", "status": "fail"}])
-    _lease(cur, "-30 minutes")
     before = _counts(cur)
 
     _liveness(cur)
@@ -157,8 +141,6 @@ def test_each_dead_watcher_fails_one_cell(cur):
         "liveness-test-stale": "fail", "liveness-test-fresh": "ok"}
     assert [c["message"] for c in cells["stale:aaa_stale"]] == ["aaa_stale not measured for 20.0 h (budget 19 h)"]
     assert "stale:bbb_untold" not in cells
-    assert [(c["status"], c["message"]) for c in cells["api"]] == [
-        ("fail", "the API's background loops have not renewed their lease; it expired 30 min ago")]
     [untold] = cells["unalerted"]
     assert untold["status"] == "fail"
     assert untold["facts"] == {"keys": ["bbb_untold"], "cells": ["bbb_untold:sreality"]}
@@ -181,7 +163,7 @@ def test_everything_alive_writes_one_ok_row(cur):
 
     assert status == "ok"
     assert details["message"] == "Watchers: all alive"
-    assert set(cells) == {"worker", "api"}
+    assert set(cells) == {"worker"}
     assert all(c["status"] == "ok" for c in details["cells"])
 
 
@@ -267,22 +249,23 @@ def test_a_dead_worker_folds_its_keys_and_its_lane_into_its_cell(cur):
     assert "health_lane" not in cells
 
 
-def test_the_lease_reads_released_as_not_measured_and_interval_zero_as_off(cur):
+def test_the_api_runs_no_matcher_so_no_lease_is_judged(cur):
+    """655: the producers run on the worker's lane alone (notifications W2b), so a lease nothing renews is no cell,
+    and an `api` incident opened before 655 recovers through the open-incident arm like any subject."""
     _beat(cur, "liveness-test-fresh", "0 minutes")
-    _lease(cur, "-5 minutes")
-    [api] = _liveness(cur)[3]["api"]
-    assert (api["status"], api["message"]) == ("ok", "the API's lease expired 5 min ago; a Problem after 11 min")
+    cur.execute("update notification_matcher_lease set holder = 'matcher:gone', "
+                "expires_at = now() - interval '1 day' where id = 1")
+    cur.execute("insert into app_settings (key, value) values ('notifications_matcher_interval_seconds', '300') "
+                "on conflict (key) do update set value = excluded.value")
 
-    _lease(cur, None)
-    status, _value, details, cells = _liveness(cur)
-    assert status == "unknown"
-    assert [(c["status"], c["facts"]) for c in cells["api"]] == [("unknown", {"state": "released"})]
-    assert details["message"] == "lease released; a clean API shutdown"
-
-    _interval(cur, 0)
     status, _value, _details, cells = _liveness(cur)
     assert status == "ok"
-    assert [(c["status"], c["facts"]) for c in cells["api"]] == [("ok", {"state": "off"})]
+    assert "api" not in cells
+
+    _incident(cur, "cell:liveness:api")
+    status, _value, _details, cells = _liveness(cur)
+    assert status == "ok"
+    assert [(c["status"], c["message"]) for c in cells["api"]] == [("ok", "no longer failing")]
 
 
 def test_an_open_incident_gets_a_verdict_every_run_so_it_can_recover(cur):
@@ -351,9 +334,9 @@ def test_stale_is_judged_on_the_last_measured_result_never_on_unmeasured_rows(cu
     assert never["facts"]["last_measured_at"] is None and never["value"] >= 24 * 29
 
 
-def _statement(start: str, end: str) -> str:
-    """One statement of migration 633, exactly as the file runs it."""
-    sql = _MIGRATION_629.read_text(encoding="utf-8")
+def _statement(start: str, end: str, migration: Path = _MIGRATION_629) -> str:
+    """One statement of a migration (633 by default), exactly as the file runs it."""
+    sql = migration.read_text(encoding="utf-8")
     head = sql.index(start)
     return sql[head:sql.index(end, head) + len(end)]
 
@@ -403,3 +386,21 @@ def test_migration_633_names_the_measure_views_wave_6_readers(cur):
     assert "scripts/checks/quality.py" in comment and "the data_quality gauge" in comment
     for retired in ("ppm2_median_shift", "ppm2_basis_floor_share", "area_vs_usable_divergence", "verify_pipeline"):
         assert retired not in comment
+
+
+def test_migration_655_post_condition_holds_and_keeps_one_liveness_row(cur):
+    _beat(cur, "liveness-test-fresh", "0 minutes")
+    cur.execute(_statement("do $post$", "$post$;", _MIGRATION_655))
+    cur.execute("select count(*) from pipeline_check_results where check_key = 'liveness'")
+    assert cur.fetchone()[0] == 1
+
+
+def test_migration_655_post_condition_refuses_a_watcher_still_reading_the_lease(cur):
+    """The guard bites: 633's body, re-created inside the test's transaction, still judges the lease."""
+    import psycopg
+
+    cur.execute(_statement("create or replace function public.health_liveness()", "$fn$;"))
+    with pytest.raises(psycopg.errors.RaiseException,
+                       match="655: health_liveness\\(\\) still judges the API's matcher lease"):
+        with cur.connection.transaction():
+            cur.execute(_statement("do $post$", "$post$;", _MIGRATION_655))
