@@ -465,9 +465,9 @@ are gone; the harness only measures.
 
 **Where it runs.** `toolkit/system_alerts.reconcile(conn)` is called every 60 s by the API's
 system-alerts loop (`api/system_alerts_loop.py`; `SYSTEM_ALERTS_INTERVAL_SECONDS = 60`, a
-constant), started in `api/main.py`'s lifespan beside the watchdog matcher and off under the same
-`NOTIFICATIONS_MATCHER_DISABLED` guard: the ladder stays off the worker, so a dead worker cannot
-silence its own alarms. A pass is one transaction under
+constant), started in `api/main.py`'s lifespan as the API's only background loop (the watchdog
+matcher went to the worker's notifications lane in W2b) and off under `HEALTH_TELLER_DISABLED`: the
+ladder stays off the worker, so a dead worker cannot silence its own alarms. A pass is one transaction under
 `pg_try_advisory_xact_lock(hashtext('health_reconcile'))` — a second caller returns zeros and
 writes nothing — and returns its counts (opened, reminded, recovered, closed silently), logged
 when any is non-zero. Its values are module constants in `toolkit/system_alerts`, spelled once
@@ -638,7 +638,6 @@ dead. Its cells judge what must not judge itself:
 | `worker` | a worker's newest heartbeat is more than 10 min old (with no heartbeat row at all, `unknown`: "no worker on record") | beats come every 30 s, the worker's watchdog exits at 300 s, a deploy gap is under 2 min |
 | `health_lane` | the health lane's own pass, read from its heartbeat entry (`details -> 'health'`, migration 621): no completed pass for 10 min, counted from the later of `last_pass_at` and the worker's `started_at` (the boot seed carries the last pass across a restart, so a restart is judged 10 min after boot, not in its first minute), a pass in flight for 10 min (`in_flight_s`: a pass skipped behind an abandoned one still records a pass) or failing for 10 min (`failing_since`, the message quoting `last_error`); `value` = minutes on that clock; emitted once the heartbeat carries a `health` entry, and folded into a failing `worker` cell. Never result rows (620 judged them): the lane writes one only for a due check, so a restart near a cycle's end read as a Problem | a pass is in flight at most 500 s, the lane's pass budget since Health dashboard sprint wave 6 (360 s in waves 4-5, 300 s in wave 3), 530 s with the heartbeat's 30 s lag; the lane sleeps its 60 s tick after each pass, so a full pass completes at most 560 s after the previous one, 590 s with the lag: both arms stay under the 10 min line, the 10 s left being the pass's own overrun (its connection and due read, each statement's 1 s floor, the daily prune); measured passes ran p50 1.9 s, max 23.1 s on 2026-10-19 |
 | `stale:<key>` | an alarm other than `liveness` whose newest measured result (ok/warn/fail written since its `declared_at`) is past its staleness budget (`public.health_stale`); with no measured result it counts from `declared_at`, so a key whose every run is Not measured is still told; facts `key`, `host`, `last_measured_at`, `budget_s` | the budget is 3 × cadence on the worker and pg_cron, cadence + 18 h on GitHub, whose crons arrive up to ~13 h late |
-| `api` | the watchdog matcher's lease (`notification_matcher_lease`) is more than 2 × `notifications_matcher_interval_seconds` (300 by default) + 60 s past its `expires_at`; a NULL `expires_at` (a clean shutdown released it) is `unknown`; interval 0 (matcher off) is `ok` with the state fact `off` | the matcher renews the lease every pass (~300.5 s apart) in the API process that also runs the ladder's loop; the lease lasts 15 min (`api/notifications._MATCHER_LEASE_TTL`), so a crashed API reads Problem about 26 min after its last renewal |
 | `unalerted` | a cell fails in an alarm's newest result (in budget, written since `declared_at`) and also failed in its newest measured result at least 2 cadences older, and has no open `cell:<key>:<subject>` incident; cells are read as the ladder reads them (the explicit `details.cells`; the implicit cell named by the key went in migration 633, Health dashboard sprint wave 6); one cell, `value` = the cells counted, its facts naming the keys and cells | a fail that has stood for two cadences has had every 60 s ladder pass in between to open its incident; like the ladder, it counts no stale or unmeasured result |
 
 While a worker's cell fails, the keys hosted on it (a host is named like its worker,
@@ -705,8 +704,9 @@ reddened a run whenever it measured a failing alarm, read or not, and could neve
 check measured elsewhere — the watcher's, or the worker's.
 
 **Who watches whom.**
-- **pg_cron** (the watcher) watches the worker (its heartbeat), the API (the matcher's lease), the
-  ladder (`unalerted`) and every alarm's freshness, the canary's GitHub-hosted keys included: a
+- **pg_cron** (the watcher) watches the worker (its heartbeat), the ladder (`unalerted`) and every
+  alarm's freshness (its `api` cell, the matcher's lease, went with the matcher in W2b, migration
+  655), the canary's GitHub-hosted keys included: a
   canary that stops running opens a `stale:<key>` incident on Health once its hourly keys pass cadence + 18 h.
 - **The API** (the ladder) turns what the watcher and the checks find into incidents and rungs, and
   keeps doing so for a dead worker because it does not run in the worker.

@@ -37,7 +37,9 @@ watchdog price-drop detection on a DAILY gate.
 
 **Hot lane — one always-on worker** (second Railway service from the EXISTING Docker image;
 the scraper package is already importable there and the API already runs the same
-settings-paced asyncio-loop pattern — matcher/outbox). It runs, as continuous loops:
+settings-paced asyncio-loop pattern — matcher/outbox; *superseded: the outbox went 2026-10-21
+(notifications W1) and the matcher moved onto this worker (W2a's `notifications` lane; W2b deleted
+the API's loop), so the API's one loop is the health teller*). It runs, as continuous loops:
 
 1. **Newest-first delta probes, 2–5 min per portal** (live-verified capability):
    bazos/idnes/realitymix/remax — default index order IS newest-first (1–3 pages/probe);
@@ -73,6 +75,9 @@ settings-paced asyncio-loop pattern — matcher/outbox). It runs, as continuous 
    already computes the price diff), sreality singleton-property creation inlined into
    `write_detail_batch` (every other portal already creates it inline). — *superseded 2026-10:
    every portal lands NULL; the straggler-attach births + browse-syncs (`scraper/listing_write.py`).*
+   *Producers superseded 2026-10-21 (notifications push W2a/W2b): the three run on the worker's
+   `notifications` lane, a constant 300 s clock over fixed windows (no cursor, so no attach race),
+   not a per-batch wake; the API runs none.*
 
 **Cold lane — GitHub Actions keeps** the delay-tolerant heavy work it does well and for
 free: full reconcile index walks (completeness + delisting evidence), image/CLIP backfills,

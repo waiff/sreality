@@ -41,9 +41,6 @@ account's iPhones (the installed PWA). Channels: the in-app feed, iPhone push, e
       with the toolkit-api one-liner, paste it as a Railway Shared Variable on the API AND the realtime-worker, delete the
       file. Gate: CI-Postgres lease/claim/429 tests green; lane `unconfigured`, then `live_devices` 0; `/push/key` 503
       then 200. The SPA half (sw.js, the switch, `/n/:dispatchId`) is #1948.
-- [ ] **Next:** W2b the API matcher goes (lease, readers, gates; Migration B; after 48 h of overlap) · the on-device proof
-      of W5 (your iPhone, a second account; after the VAPID key) · W6 the one destructive prune, backup first (R8; drops
-      `dedupe_key`, its UNIQUE and `trigger_snapshot_id`).
 - [ ] **W5a (built 2026-10-21, stacked on W1; done when merged)** — the phone surfaces that need no push plumbing
       (R4, F9): one unread observer in Shell for both frames and the page (`lib/unreadCount`), the app-icon badge
       from it, the phone header's bell beside Účet, and /notifications at phone width (one page, `max-md:`).
@@ -52,6 +49,16 @@ account's iPhones (the installed PWA). Channels: the in-app feed, iPhone push, e
       harness over every payload shape; the landing `/n/:dispatchId` (mark-seen → `dispatchTarget`, `?d=` → `/push/opened`);
       `lib/push` + `usePush` and the sheet's switch "Oznámení na tomto iPhonu"; re-sync on sign-in and the hourly
       resume; binding follows identity (F18). Owed: the on-device proof (W5 gate, the operator's iPhone).
+- [ ] **W2b (built 2026-10-21, stacked on W4; held until W2a has had 48 h of overlap in production; migration 655 applied
+      first)** — one clock in the worker: `matcher_loop` goes with its lease, three interval readers, three thread
+      wrappers and two daily gates; the API's lifespan starts the health teller alone, under `HEALTH_TELLER_DISABLED`
+      (was `NOTIFICATIONS_MATCHER_DISABLED`, no alias); migration 655 = Migration B (`health_liveness()` without its
+      `api` lease cell, an open `api` incident recovers); the jobs check reads a registered lane missing from the
+      heartbeat as Watch, then Problem. Gate: Railway API + worker success, no matcher log lines; over 7 days inactive
+      and reactivated ~60% down, new ≥ the replay. For W6: the lease table and six settings rows are read by nothing.
+- [ ] **Next:** W2b merges after the 48 h overlap (migration 655 first) · W6 the one destructive prune, backup
+      first (R8; drops `dedupe_key`, its UNIQUE, `trigger_snapshot_id`, `notification_matcher_lease` and the matcher's
+      settings rows) · the on-device proof of W5 (your iPhone, a second account; after the VAPID key).
 
 ### Phase U-NEW-PROPERTY: a property from a pasted ad link (in progress, 2026-10-20)
 
