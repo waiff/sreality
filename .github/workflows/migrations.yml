@@ -162,6 +162,14 @@ jobs:
             -c "select 'image_clip_embeddings'::regclass;" \
             -c "select count(*) as listings_rows from listings;"
 
+      # Migration 656 (notifications W6, destructive) is re-runnable by contract: apply_migration.yml's lock-timeout
+      # retry re-runs the WHOLE file, possibly after its transaction committed (collections' ALTER comes after the
+      # COMMIT). A second psql -f over the replayed schema, before any live test seeds rows, proves every $pre$ guard
+      # tolerates what the first run dropped (a read of a dropped object sits inside its own existence IF: PL/pgSQL
+      # prepares a whole IF condition at once) and that $post$ holds again.
+      - name: Migration 656 re-runs clean after it applied (the lock-timeout retry contract)
+        run: psql -v ON_ERROR_STOP=1 -q -f migrations/656_notifications_w6_prune.sql
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"

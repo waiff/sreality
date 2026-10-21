@@ -47,23 +47,26 @@
 --      ledger is missing; a row names its ad by sreality_id alone (its listing_id NULL); any function body other than
 --      the two this file replaces names a dropped object; any view, policy, trigger, foreign key, index, statistics
 --      object or constraint outside this file's list depends on a dropped column or table (pg_depend); a row outside
---      system_health violates a narrowed CHECK. Every check tolerates an object a previous run already dropped, so a
---      lock-timeout retry re-runs the file.
+--      system_health violates a narrowed CHECK. Every check tolerates an object a previous run already dropped (a
+--      read of a dropped object sits inside its own existence IF, never in one condition with it), so a lock-timeout
+--      retry re-runs the file; CI re-runs it once after the replay to prove it.
 --   1. ONE transaction, its tables locked first in the order a feed read takes them (dispatches, watchdogs):
 --      (a) R2 (b): DELETE every source_kind = 'system_health' row, a NOTICE with the count, after asserting no
 --          notification_deliveries row references one (the cascade would take it; SYSTEM has no member, so no device
---          could hold one). The only deletion in the table's history by our code (CLAUDE.md rule 16).
+--          could hold one). Rows deleted on record (CLAUDE.md rule 16): 204's orphan repair, the pre-W3 merge twin
+--          collapse and this; since W3 (653) a merge marks a duplicate and deletes nothing.
 --      (b) sync_notification_dispatches_account_id() (641) without its SYSTEM else-branch: the watchdog,
 --          collection_monitor and share arms verbatim, anything else raises. notification_dispatches_source_ck (274,
 --          641) loses its system_health arm; notification_dispatches_change_kind_ck (652) the three kinds no row
 --          carries: system_alert (gone with its rows), shared (relabelled by 652/653), broker_change (never emitted).
 --      (c) notification_dispatches loses dedupe_key (+ its UNIQUE, replaced by 653's identity), trigger_snapshot_id,
 --          channel (+ CHECK), status (+ CHECK), error_message, target_channels, sreality_id (+ its index),
---          estimation_run_id (+ its FK) and message: 24 columns -> 15. The four indexes 653's feed index replaces
---          go too: the unread partial index and the dispatched_at index (057), the keyset index (199) and
---          source_kind_idx (206; every reader that filters on source_kind also names the account (the feed index,
---          or 653's identity, whose prefix is (account_id, source_kind)) or a collection and property (their own
---          indexes); with the 906 system rows gone the table is ~45 rows).
+--          estimation_run_id (+ its FK) and message: 24 columns -> 15. Two indexes go: the plain dispatched_at
+--          index (057), which the keyset index (199) covers as its prefix, and source_kind_idx (206), a three-value
+--          column that only the system rows made selective (with them gone the table is ~45 rows). The keyset
+--          index and the unread partial index (057) STAY: the tenant readers (the feed, the unread count,
+--          mark-all-seen) state no account_id, RLS supplies it, so 653's (account_id, ...) feed index does not
+--          serve them.
 --      (d) notification_subscriptions loses channels (208) and last_matched_first_seen_at (the cursor W2a deleted).
 --      (e) channel_sends (207), notification_suppression and resend_webhook_events (367), notification_matcher_lease
 --          (366): no CASCADE ($pre$ proved nothing outside them depends; RESTRICT would refuse a dependent anyway).
@@ -72,11 +75,12 @@
 --          only, so a bare DELETE would leave no trail).
 --   2. collections.notify_channels (211), its own statement after the commit: collections is read on every
 --      curation surface, so its ACCESS EXCLUSIVE lock is held for that one catalog change only.
---   3. $post$: the 15 columns, the four tables, the function, the settings rows and the system rows gone, the
---      narrowed CHECKs and trigger as written, 653's identity index still valid.
+--   3. $post$: the 15 columns, the four tables, the function, the settings rows, the system rows and the two indexes
+--      gone, the keyset and unread indexes kept, the narrowed CHECKs and trigger as written, 653's identity index
+--      still valid.
 --
 -- NOT HERE. notification_deliveries / push_subscriptions (654) and every column the identity, the feed or the push
--- lane reads. collection_idx, property_idx and listing_id_idx stay (the collection FK and the detectors read them).
+-- lane reads. collection_idx, property_idx, listing_id_idx, the keyset index and the unread partial index stay.
 -- notification_dispatches_pre204_backup, an ad-hoc copy outside the migrations, is not this program's. #1910's
 -- migration 643 drops emit_verification_stale_alert() too: both are DROP ... IF EXISTS, whichever runs first.
 -- After this file 652's and 653's fills cannot re-run (they read dedupe_key); nothing needs them to.
@@ -112,10 +116,15 @@ begin
               where worker = 'realtime-worker' and not coalesce(details ? 'notifications', false)) then
     raise exception '656 refused: the realtime worker beats with no notifications lane: W2a is not deployed';
   end if;
-  if to_regclass('public.notification_matcher_lease') is not null
-     and exists (select 1 from public.notification_matcher_lease
-                  where expires_at > now() - interval '5 minutes') then
-    raise exception '656 refused: notification_matcher_lease was renewed in the last 20 min: W2b is not deployed';
+  -- A read of an object this file drops sits INSIDE its existence IF, never beside it in one condition: PL/pgSQL
+  -- prepares a whole IF condition as one SELECT, so `to_regclass(x) is not null and exists (select from x)` fails to
+  -- parse once x is gone (42P01), while a nested statement is prepared only when reached. So a re-run after the
+  -- transaction committed (a lock-timeout retry on collections' ALTER) passes every guard.
+  if to_regclass('public.notification_matcher_lease') is not null then
+    if exists (select 1 from public.notification_matcher_lease
+                where expires_at > now() - interval '5 minutes') then
+      raise exception '656 refused: notification_matcher_lease was renewed in the last 20 min: W2b is not deployed';
+    end if;
   end if;
   if not exists (select 1 from pg_index i
                   where i.indexrelid = to_regclass('public.notification_dispatches_identity_uq')
@@ -127,12 +136,13 @@ begin
   if to_regclass('public.notification_deliveries') is null then
     raise exception '656 refused: notification_deliveries is missing: migration 654 (W4) is not applied';
   end if;
-  -- A row whose legacy id is its only link to its ad would lose the ad with sreality_id (0 on 2026-10-21). The
-  -- statement runs only while the column exists, so a re-run after the drop never reads it.
+  -- A row whose legacy id is its only link to its ad would lose the ad with sreality_id (0 on 2026-10-21); nested,
+  -- so a re-run after the drop never prepares the read (42703).
   if exists (select 1 from information_schema.columns
-              where table_schema = 'public' and table_name = 'notification_dispatches' and column_name = 'sreality_id')
-     and exists (select 1 from public.notification_dispatches where sreality_id is not null and listing_id is null) then
-    raise exception '656 refused: a dispatch names its ad by sreality_id alone (listing_id NULL)';
+              where table_schema = 'public' and table_name = 'notification_dispatches' and column_name = 'sreality_id') then
+    if exists (select 1 from public.notification_dispatches where sreality_id is not null and listing_id is null) then
+      raise exception '656 refused: a dispatch names its ad by sreality_id alone (listing_id NULL)';
+    end if;
   end if;
 
   -- Function bodies: pg_depend does not track plpgsql, so a body naming a dropped object is read off its source.
@@ -258,7 +268,7 @@ alter table public.notification_dispatches add constraint notification_dispatche
   change_kind in ('new', 'price_drop', 'price_rise', 'inactive', 'reactivated', 'new_source',
                   'shared_collection', 'shared_dashboard', 'shared_pipeline'));
 
--- (c) The nine columns, their constraints and index first, then the four replaced indexes.
+-- (c) The nine columns, their constraints and index first, then the two indexes nothing needs.
 alter table public.notification_dispatches
   drop constraint if exists notification_dispatches_dedupe_key_key,
   drop constraint if exists notification_dispatches_channel_check,
@@ -276,16 +286,15 @@ alter table public.notification_dispatches
   drop column if exists estimation_run_id,
   drop column if exists message;
 
-drop index if exists public.notification_dispatches_unread_idx;
 drop index if exists public.notification_dispatches_dispatched_at_idx;
-drop index if exists public.notification_dispatches_dispatched_id_keyset_idx;
 drop index if exists public.notification_dispatches_source_kind_idx;
 
 comment on table public.notification_dispatches is
   'One immutable row per real-world change, owned by one account (notifications push program, migrations 206, '
   '652-656): three producers (watchdog, collection_monitor, share), one identity (notification_dispatches_identity_uq), '
-  'one feed. Deliveries are notification_deliveries rows. Nothing deletes a row but the account and collection '
-  'cascades; migration 656 deleted the system_health history once, after a backup (ruling R2 (b)).';
+  'one feed. Deliveries are notification_deliveries rows. Append-only for the producers'' events since 653 (a merge '
+  'marks, never deletes); rows deleted on record: 204''s orphan repair, the pre-W3 twin collapse, 656''s system_health '
+  'history (ruling R2 (b), after a backup); account and collection deletion still cascade.';
 comment on column public.notification_dispatches.source_kind is
   'Which producer wrote this event: watchdog (subscription_id set), collection_monitor (collection_id set) or share '
   '(the recipient''s account, collection_id set for a collection); notification_dispatches_source_ck.';
@@ -365,13 +374,15 @@ begin
   if exists (select 1 from public.notification_dispatches where source_kind = 'system_health') then
     raise exception '656 did not land: a system_health row survived';
   end if;
-  if to_regclass('public.notification_dispatches_unread_idx') is not null
-     or to_regclass('public.notification_dispatches_dispatched_at_idx') is not null
-     or to_regclass('public.notification_dispatches_dispatched_id_keyset_idx') is not null
+  if to_regclass('public.notification_dispatches_dispatched_at_idx') is not null
      or to_regclass('public.notification_dispatches_source_kind_idx') is not null
      or to_regclass('public.notification_dispatches_sreality_id_idx') is not null
      or to_regclass('public.notification_dispatches_dedupe_key_key') is not null then
-    raise exception '656 did not land: a replaced index survived';
+    raise exception '656 did not land: a dropped index survived';
+  end if;
+  if to_regclass('public.notification_dispatches_dispatched_id_keyset_idx') is null
+     or to_regclass('public.notification_dispatches_unread_idx') is null then
+    raise exception '656 did not land: the tenant readers'' keyset or unread index is gone';
   end if;
 
   select pg_get_constraintdef(oid) into v_def from pg_constraint

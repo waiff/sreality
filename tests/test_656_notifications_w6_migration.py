@@ -128,3 +128,73 @@ def test_post_pins_the_fifteen_columns() -> None:
     for proof in ("i.indisvalid", "i.indnullsnotdistinct", "emit_verification_stale_alert()",
                   "source_kind = 'system_health'", "notification_dispatches_source_kind_idx"):
         assert proof in post, proof
+
+
+# Every name a re-run may find already dropped (the CHECK/view-free generic column words included).
+_GONE = (*_TABLES, *_COLUMNS, "channels", "last_matched_first_seen_at", "notify_channels")
+
+
+def _do_blocks(sql: str) -> dict[str, str]:
+    """Each DO block's body, comments stripped and string literals blanked (a name inside a literal is data)."""
+    code = re.sub(r"--[^\n]*", "", sql)
+    blocks = {m.group(1): m.group(2) for m in re.finditer(r"do \$(\w+)\$(.*?)\$\1\$;", code, re.S)}
+    return {tag: re.sub(r"'(?:[^']|'')*'", "''", body) for tag, body in blocks.items()}
+
+
+def _enclosing_ifs(body: str, at: int) -> list[tuple[str, int]]:
+    """Every IF around offset `at`, innermost first: (its condition, where its THEN ends)."""
+    out: list[tuple[str, int]] = []
+    for m in reversed(list(re.finditer(r"(?<!end )\bif\b", body[:at]))):
+        start, depth = m.start(), 0
+        for n in re.finditer(r"(?<!end )\bif\b|\bend if\b", body[start:]):
+            depth += -1 if n.group(0) == "end if" else 1
+            if depth == 0:
+                if start + n.start() > at:
+                    then = body.index(" then", start) + len(" then")
+                    out.append((body[start:then], then))
+                break
+    return out
+
+
+def test_no_guard_reads_a_dropped_object_outside_its_own_existence_if() -> None:
+    """PL/pgSQL prepares a whole IF condition as one SELECT, so `to_regclass(x) is not null and exists (select from
+    x)` fails to parse (42P01 / 42703) once x is gone, and the lock-timeout retry, which re-runs the file after its
+    transaction committed, would die as a non-lock error. Every statement that names a dropped object sits in the
+    BODY of an outer IF whose condition only asks whether that object exists (the inner statement is prepared only
+    when reached). CI's migrations job also re-runs the file over the replayed schema ("Migration 656 re-runs
+    clean")."""
+    blocks = _do_blocks(SQL)
+    assert set(blocks) == {"pre", "system", "post"}
+    reads = 0
+    for tag, body in blocks.items():
+        for name in _GONE:
+            for m in re.finditer(rf"\b{name}\b", body):
+                guards = [(cond, then) for cond, then in _enclosing_ifs(body, m.start())
+                          if m.start() >= then and name not in cond
+                          and ("to_regclass(" in cond or "information_schema.columns" in cond)]
+                assert guards, f"${tag}$ reads {name} outside an existence IF's body"
+                reads += 1
+    assert reads == 2, "the lease and the sreality_id guards are the only reads of a dropped object"
+    assert "if to_regclass('public.notification_matcher_lease') is not null then if exists" in CODE
+    assert "and column_name = 'sreality_id') then if exists" in CODE
+
+
+def test_ci_re_runs_the_file_after_the_replay() -> None:
+    workflow = (MIGRATIONS.parent / ".github" / "workflows" / "migrations.yml").read_text(encoding="utf-8")
+    replay = workflow.index("name: Apply migrations in numeric order")
+    rerun = workflow.index("name: Migration 656 re-runs clean after it applied")
+    first_live = workflow.index("name: PREPARE every SQL statement against the replayed schema")
+    assert replay < rerun < first_live
+    assert "run: psql -v ON_ERROR_STOP=1 -q -f migrations/656_notifications_w6_prune.sql" in workflow[rerun:first_live]
+
+
+def test_the_tenant_readers_indexes_stay() -> None:
+    """The feed, the unread count and mark-all-seen run under RLS and state no account_id, so 653's
+    (account_id, ...) index does not serve them: the keyset and unread indexes stay; only the plain dispatched_at
+    index (the keyset index's prefix) and source_kind_idx go."""
+    drops = set(re.findall(r"drop index if exists public\.(\w+);", CODE))
+    assert drops == {"notification_dispatches_sreality_id_idx", "notification_dispatches_dispatched_at_idx",
+                     "notification_dispatches_source_kind_idx"}
+    post = CODE[CODE.index("do $post$"):]
+    assert "to_regclass('public.notification_dispatches_dispatched_id_keyset_idx') is null" in post
+    assert "to_regclass('public.notification_dispatches_unread_idx') is null" in post
