@@ -62,7 +62,7 @@ account's iPhones (the installed PWA). Channels: the in-app feed, iPhone push, e
       catalog dependent names a dropped object; R2 (b)'s system_health rows deleted (~906 on 2026-10-21); the account
       trigger's SYSTEM branch and the CHECKs narrowed (three producers, nine kinds); `notification_dispatches` 24 -> 15
       columns (`dedupe_key` + UNIQUE, `trigger_snapshot_id`, `channel`, `status`, `error_message`, `target_channels`,
-      `sreality_id`, `estimation_run_id`, `message`) and the four replaced indexes; `channels` and the cursor on
+      `sreality_id`, `estimation_run_id`, `message`), the plain `dispatched_at` and `source_kind` indexes (the keyset and unread ones stay: the RLS readers state no account); `channels` and the cursor on
       watchdogs, `notify_channels` on collections; `channel_sends`, `notification_suppression`,
       `resend_webhook_events`, `notification_matcher_lease`, `emit_verification_stale_alert()`, the nine settings rows
       (copied to `app_settings_history` first). Code: the bell's share sentence from `actor_email` / `share_name` /

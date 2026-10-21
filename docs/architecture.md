@@ -2239,12 +2239,14 @@ renumber.** Navigate by area:
     `(source_kind ∈ {watchdog, collection_monitor, share}, subject,
     change_kind)` — **property-grain** for the first two; a `share` row stores no text (its sender is
     `actor_account_id`, named in the bell through `share_party_emails()` while a share joins the two
-    accounts, and the shared thing by its live name). The table is **append-only for its producers'
-    events**: its one deletion by our code is ruling R2 (b)'s `system_health` history (the fourth
-    producer until W1, ~900 rows, never read; migration 656, 2026-10, after a `backup_before_drop.yml`
-    backup), and since 656 the account trigger raises and the CHECKs refuse any other source or kind
-    (the `SourceKind` alias in `api/notifications.py` is the list). Only the account and collection
-    cascades remove a row now. Rows are
+    accounts, or while the sharer stands in the reader's own delegated-edit ledger, and the shared thing
+    by its live name). The table is **append-only for its producers' events since W3** (migration 653:
+    a merge marks a duplicate, never deletes). Rows deleted on record: migration 204's orphan repair
+    (twins of re-pointed rows), the pre-W3 merge carrier's twin collapse, and ruling R2 (b)'s
+    `system_health` history (the fourth producer until W1, ~900 rows, never read; migration 656,
+    2026-10, after the `backup_before_drop.yml` backup labelled `notifications-w6`); account and
+    collection deletion still cascade. Since 656 the account trigger raises and the CHECKs refuse any
+    other source or kind (the `SourceKind` alias in `api/notifications.py` is the list). Rows are
     deduped by **ONE event identity** (notifications W3, migration 653): the unique index
     `notification_dispatches_identity_uq` over `EVENT_IDENTITY` (`api/notifications.py`) =
     `(account_id, source_kind, subscription_id, collection_id, change_kind, property_id, event_ref,
@@ -2439,10 +2441,10 @@ renumber.** Navigate by area:
     (the canary's own keys included); a dead API is visible only through `unalerted` and the canary;
     the API tells; the canary watches pg_cron, the
     teller and whether an alarm stands unacknowledged; the worker's `jobs` check watches every scheduled
-    machine, the canary's poller included (wave 3). **The `system_health` rows (history since W1) are
-    NOT property-grain** — about the pipeline, not a listing, so `listing_id` / `sreality_id` /
-    `subscription_id` / `collection_id` are all NULL and the merge reconciler has nothing to re-point
-    on them. **One incident model since wave 3 (migration 621):** the reliability
+    machine, the canary's poller included (wave 3). **The `system_health` rows (no writer since W1,
+    deleted by migration 656) were NOT property-grain** — about the pipeline, not a listing, so
+    `listing_id` / `sreality_id` / `subscription_id` / `collection_id` were all NULL and the merge
+    reconciler had nothing to re-point on them. **One incident model since wave 3 (migration 621):** the reliability
     program's `ops_incidents` signature engine (migration 462: one open row per error-TEXT
     signature, fed by `scraper.portal_runner`'s crash path, the worker's lane failures and the
     poller's job-log backstop) is deleted and its open rows closed as `retired: signature engine`;
@@ -2452,20 +2454,25 @@ renumber.** Navigate by area:
     **The third live producer is `share` (migration 610, one kind for every share since 641; dashboards since 647).**
     `api/shares.py` writes it for a collection share (`POST /collections/{id}/shares`: ONE dispatch
     per (collection, recipient) ever — the identity holds no time, so a revoke + re-share loop cannot
-    refill an inbox; `collection_id` set; "<owner email> shared
-    the collection "<name>" with you") and for a pipeline share (`POST /pipeline/shares`: one per
-    (owner, recipient, mode), written when the grant is
-    new or widens to edit; `collection_id` NULL; "<owner email> shared their pipeline with you (view
-    only|edit)") and for a dashboard share (647: once per (dashboard, recipient) ever, `collection_id`
-    NULL, "<owner email> shared the dashboard "<name>" with you") — `subscription_id` NULL, `change_kind` naming what opens
-    (`shared_collection | shared_dashboard | shared_pipeline`, migration 652, which relabelled the old `'shared'` rows; the feed's
-    `share_kind` reads it), `actor_account_id` the sharer and `event_ref` the dashboard id or the mode (the feed's `share_ref` is
-    the collection id, the actor or the event_ref, never a parsed key), the one stored copy of an email
-    in the sharing model (a snapshot at share time), in-app and pushed since W4 (collection-sharing
-    ruling 5(e)'s in-app-only superseded 2026-10-21, `docs/design/notifications-push/PROGRAM.md` § 3.1). Migration 641 renamed 610's `collection_share` rows and keys. It is stamped to
+    refill an inbox; `collection_id` set), for a pipeline share (`POST /pipeline/shares`: one per
+    (owner, recipient, mode), written when the grant is new or widens to edit; `collection_id` NULL)
+    and for a dashboard share (647: once per (dashboard, recipient) ever, `collection_id` NULL) —
+    `subscription_id` NULL, `change_kind` naming what opens (`shared_collection | shared_dashboard |
+    shared_pipeline`, migration 652, which relabelled the old `'shared'` rows; the feed's `share_kind`
+    reads it), `actor_account_id` the sharer and `event_ref` the dashboard id or the mode (the feed's
+    `share_ref` is the collection id, the actor or the event_ref, never a parsed key), and NO text:
+    since W6 the row stores no sentence and no email (migration 656 dropped `message`, which held "<owner
+    email> shared ..." snapshots). The bell composes the sentence from three feed columns read under the
+    recipient's RLS: `actor_email` (the sharer through `share_party_emails()`, NULL once no share joins
+    the two accounts, unless the sharer stands in the recipient's own delegated-edit ledger, whose stamp
+    outlives a revoke, migration 641), `share_name` (the collection's or dashboard's live name, NULL once
+    the recipient cannot read it) and `share_mode` (a pipeline share's mode). In-app and pushed since W4
+    (collection-sharing ruling 5(e)'s in-app-only superseded 2026-10-21,
+    `docs/design/notifications-push/PROGRAM.md` § 3.1); the push names what opens, never who. Migration
+    641 renamed 610's `collection_share` rows and keys. It is stamped to
     the RECIPIENT by the route on the service role (tenants hold no INSERT on the table), and the
     `sync_notification_dispatches_account_id()` trigger KEEPS the supplied account for this kind
-    and raises when none is supplied. Like `system_health` it is NOT property-grain
+    and raises when none is supplied. Like the deleted `system_health` rows it is NOT property-grain
     (`property_id` NULL), so no carrier touches it. ONE `SourceKind` alias in
     `api/notifications.py` names the kinds every list/unread/mark route accepts.
     The unified in-app **Notifications**
