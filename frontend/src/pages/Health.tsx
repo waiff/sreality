@@ -126,7 +126,7 @@ export default function Health() {
 }
 
 /* The watchers speak the page's first line: the liveness row's status and, when it is not OK,
- * its own cells' sentences (worker heartbeat, health lane, stale alarms, the API's loops), worst
+ * its own cells' sentences (worker heartbeat, health lane, stale alarms, unalerted cells), worst
  * first, as written. A stale or absent liveness row reads Not measured, never OK. */
 function Watchers({ row }: { row: HealthRow | null }) {
   if (!row) {
