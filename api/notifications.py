@@ -478,8 +478,9 @@ _LISTING_PROJECTION = (
 # never a key: the collection id, the pipeline owner (the actor), the dashboard id (event_ref).
 # A share stores no text (F17, R11; `message` dropped by migration 656): the bell's sentence is the
 # SPA's, from `actor_email` (the sharer, through share_party_emails() exactly as
-# api/shares.party_label spells it, so it is NULL once no share joins the two accounts; a detector's
-# row has no actor and never calls it),
+# api/shares.party_label spells it, so it is NULL once no share joins the two accounts, unless the
+# sharer stands in the reader's own delegated-edit ledger: that arm keeps an actor's address for the
+# owner after a revoke, migration 641; a detector's row has no actor and never calls it),
 # `share_name` (the collection's or dashboard's live name, NULL once the caller cannot read it) and
 # `share_mode` (a pipeline share's mode, its event_ref).
 _DISPATCH_SELECT = (

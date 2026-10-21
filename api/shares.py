@@ -69,7 +69,9 @@ _UPSERT_PIPELINE_SHARE_SQL = (
 # ONE notification per identity ever (EVENT_IDENTITY, migration 653): no time in it, so a revoke +
 # re-share loop cannot refill the recipient's inbox. No text either (F17, R11): the bell names the
 # sharer from the actor through share_party_emails() and the shared thing by its live name, so the
-# address drops out once no share joins the two (api/notifications._DISPATCH_SELECT). The kind names
+# address drops out once no share joins the two, unless the sharer stands in the recipient's own
+# delegated-edit ledger (that arm keeps an actor's address for the owner after a revoke, migration
+# 641; api/notifications._DISPATCH_SELECT). The kind names
 # what opens (migration 652), the actor is the sharer (the owner: sharing never delegates) and
 # event_ref tells two shares of one kind apart (the dashboard id, the pipeline mode; NULL for a
 # collection, whose id is its own column).

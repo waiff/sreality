@@ -165,7 +165,8 @@ there (`docs/design/pipeline-sharing.md` §3.7; pinned offline by
   `collection_share`); `api/shares.py` writes all three with `change_kind` `shared_<collection|pipeline|dashboard>`
   (652), the sharer as `actor_account_id` and the dashboard id or the mode as `event_ref` and NO text (656 dropped
   `message`: the bell names the sharer through `share_party_emails()`, so the address drops out once no share joins the
-  two, and the thing by its live name), conflicting on the
+  two, unless the sharer is an actor in the recipient's own `delegated_edits` ledger, whose stamp outlives a revoke; and
+  the thing by its live name), conflicting on the
   one event identity (`EVENT_IDENTITY`, migration 653; 656 dropped `dedupe_key`), so a share notifies once per
   identity: (recipient, collection or dashboard, actor), and for a pipeline (recipient, owner, mode) — a
   widening to edit is a second notification. In-app and pushed (W4; collection-sharing ruling 5(e) superseded
