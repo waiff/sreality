@@ -228,7 +228,9 @@ WATCHDOG_LAST_WORDS_SECONDS = 10.0
 # connects (db.connect's default is three attempts at psycopg's 130 s each).
 HEARTBEAT_CONNECT_TIMEOUT_SECONDS = 10
 # Every lane _amain registers, in its order. Each has a heartbeat entry from boot, so a
-# lane that never woke reads as such instead of being absent.
+# lane that never woke reads as such instead of being absent, and the jobs check
+# (scripts/checks/platform.WORKER_LANES, a pinned mirror) reads a lane absent from the
+# beat as a worker older than its code.
 LANES: tuple[str, ...] = (
     "probe", "drain", "images", "count_probe", "maintenance", "broker_maintenance",
     "estimation", "location_resolve", "location_intake_fast", "location_refetch",
