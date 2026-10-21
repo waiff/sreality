@@ -44,7 +44,7 @@ any more: the last, `ppm2_median_shift`'s "compared NOTHING", went with that key
 wave 6, whose median-shift arm reads Not measured until 6 days of its own history exist. The harness
 writes no system alert: results become incidents through the ladder below, shown on Health and told
 outside the app only by the canary's GitHub e-mail (no bell since 2026-10-21, ruling R2b). Since wave 2 the
-pg_cron watcher `health_liveness()` (migration 620) judges whether the worker, the API, the
+pg_cron watcher `health_liveness()` (migration 620) judges whether the worker, the
 ladder and every alarm are alive, and the canary checks the watcher and the ladder from GitHub
 ("Hosts, the watcher and the canary" below). The harness exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
@@ -720,10 +720,10 @@ check measured elsewhere — the watcher's, or the worker's.
   since Health dashboard sprint wave 5 the engine check (`dedup`), and since wave 6 the `parsing` alarm
   and the quality gauges. The watcher's `health_lane` cell watches the lane.
 
-**Known gap.** A clean API shutdown leaves the lease NULL, which reads Not measured, not Problem:
-that is every deploy's normal state until the new process's first pass claims the lease. An API
-that stops cleanly and never comes back is therefore no liveness Problem by itself; it shows only
-once a liveness cell fails and finds no incident, which the canary's third assertion then emails.
+**Known gap.** Since migration 655 (notifications W2b) the watcher judges no API state: the
+matcher's lease, its only API signal, went with the matcher. A dead API (no teller) shows only
+through `unalerted`, two cadences after a cell fails with no incident, and through the canary,
+whose third assertion emails a failing liveness cell that finds no incident.
 
 ## Delivery readiness — deleted (notifications push program W1, 2026-10-21)
 
@@ -845,7 +845,7 @@ failing rule; the other lanes' `last.errors` count per-item failures inside comp
 | OK, `off` | `interval_s` ≤ 0, or the newest pass's `last.skipped == "slice<=0"` (what a drain or images pass with a slice ≤ 0 records; any other `skipped`, autodedup's included, is not off) |
 | Problem, never woke | `interval_s` is None and the worker has been up more than 15 min (`jobs_lane_boot_grace_s`) |
 | Not measured | the lane's entry has no `interval_s` key at all, which only a worker from before wave 3 writes (the seeded None, the key present and null, is "never woke"); this guards the first deploy, while the old process's beat can still be the newest row |
-| Watch, then Problem, missing | a lane in `LANES` has no heartbeat entry at all (notifications W2b): the beat is from a worker older than this code, a deploy it lags; with the API's matcher gone, a worker without the `notifications` lane would leave the producers unrun and no cell would say so. Watch the first time (this worker's health lane can read its predecessor's row before its own first beat), Problem when the previous measurement read it missing too (fact `missing`); the `heartbeat` lane has no cell, missing or not. It reads another process's beat, never the checker's own: a worker wholly on old code runs the old check too, and shows only in Railway's per-service commit status |
+| Watch, then Problem, missing | a lane in `LANES` has no heartbeat entry at all (notifications W2b): the beat is from an older process beating beside the new one (a deploy overlap); with the API's matcher gone, a worker without the `notifications` lane would leave the producers unrun and no cell would say so. Watch the first time (this worker's health lane can read its predecessor's row before its own first beat), Problem when the previous measurement read it missing too (fact `missing`); the `heartbeat` lane has no cell, missing or not. It reads another process's beat, never the checker's own: a worker wholly on old code runs the old check too, and shows only in Railway's per-service commit status |
 | Problem, late | `now − last_pass_at` > max(3 × `interval_s`, `interval_s` + 2 × `last_duration_s`, 15 min) (`jobs_lane_floor_s`), once the worker has been up longer than that bound; a lane with no pass yet counts from the worker's start; a lane with no pass in this process counts from the worker's boot, or from this check's previous measurement when the lane read off then (switched on after boot) |
 | Problem, failing | `failing_since` older than max(3 × `interval_s`, 15 min), or set at all when `interval_s` ≥ 1 h (`jobs_lane_daily_interval_s`; a daily lane passes about once per boot) |
 | Problem, in flight | a pass running more than 1,800 s (`jobs_lane_inflight_fail_s`, `LANE_PASS_TIMEOUT_SECONDS`) |

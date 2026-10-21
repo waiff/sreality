@@ -268,9 +268,9 @@ select beat_at, started_at, details from worker_heartbeats where worker = %(work
 """
 
 # scraper/realtime_worker.LANES, in its order (a check never imports the worker; a test pins the two). The worker seeds
-# every lane it registers into its heartbeat at boot, so a lane named here and absent from the beat was not written by
-# a worker running this code: an older process still beating (a deploy that did not replace it), which would leave the
-# lane's work undone with no cell to say so (the notifications lane is the producers' one clock since W2b).
+# every lane it registers into its heartbeat at boot, so a lane named here and absent from the beat was written by an
+# OLDER process beating beside this one (a deploy overlap). It cannot see a lone worker on old code: that worker runs
+# the old check too, and only Railway's per-service commit status shows it (the W2b gate reads that).
 WORKER_LANES: tuple[str, ...] = (
     "probe", "drain", "images", "count_probe", "maintenance", "broker_maintenance",
     "estimation", "location_resolve", "location_intake_fast", "location_refetch",
@@ -310,12 +310,13 @@ def _missing_lane(lane: str, previous: dict[str, Any]) -> dict[str, Any]:
     """A registered lane the heartbeat lacks: Watch at once, Problem when the previous measurement read it missing too.
 
     Once, it can be this worker's own boot (its health lane reaching the read before its first beat replaced the
-    predecessor's row); two measurements apart (one cadence, 10 min, against a 30 s beat) it is a worker that lags.
+    predecessor's row); two measurements apart (one cadence, 10 min, against a 30 s beat) it is an older process still
+    beating beside this one.
     """
     subject = f"lane/{lane}"
     again = bool(((previous.get(subject) or {}).get("facts") or {}).get("missing"))
-    said = ("missing: the heartbeat has no entry for it, so the beat is from a worker older than "
-            "this code (a deploy it lags)")
+    said = ("missing: the heartbeat has no entry for it, so the beat is from an older process "
+            "beating beside this one (a deploy overlap)")
     return _cell(subject, "fail" if again else "warn",
                  said + ("; missing at the previous measurement too" if again else ""),
                  facts={"missing": True})

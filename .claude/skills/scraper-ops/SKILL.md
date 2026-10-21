@@ -385,7 +385,7 @@ Per-lane notes:
   detector; `SET LOCAL statement_timeout` 120 s; the notification-events lock SHARED first, so a merge waits one statement at most and never deadlocks,
   architecture § rule 16). A step that raises or has a failed statement is its own `portal_errors` entry, `lane/notifications/<step>` red alone while
   the others write; a stored spec the matcher refuses is `last.*.subscriptions_invalid`, never red (the write routes 422 it), even when every watchdog
-  is. A worker without the lane is the jobs check's missing-lane cell; `NOTIFICATIONS` log line only on a write or a failure.
+  is. An older process without the lane, beating beside a new one (a deploy overlap), is the jobs check's missing-lane cell; a lone worker on old code runs the old check too and shows only in Railway's per-service commit status; `NOTIFICATIONS` log line only on a write or a failure.
 - **Push lane** (notifications push W4, PROGRAM.md § 3.3–3.4; `api/push_delivery.deliver_once`) — CONSTANT 15 s; the ONE brake is
   `VAPID_PRIVATE_KEY` (unset: `last.unconfigured`, no connection; unreadable: the `lane/push/key` cell). A pass: fan-out (VISIBLE unseen
   events ≤ 24 h × the account's live devices registered before each; a share past one per sharer a day = `skipped/capped`), a claim

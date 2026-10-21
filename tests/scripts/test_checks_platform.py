@@ -555,8 +555,8 @@ def test_the_checks_lane_list_is_the_workers() -> None:
 
 def test_a_registered_lane_missing_from_the_heartbeat_is_watch_then_a_problem() -> None:
     """The missing-lane rule (notifications W2b): a beat without a lane this code registers comes
-    from a worker older than it, e.g. one without the notifications lane, the producers' one clock
-    since the API's matcher went. Once is Watch (this worker's health lane can read its
+    from an older process beating beside this one, e.g. one without the notifications lane, the
+    producers' one clock since the API's matcher went. Once is Watch (this worker's health lane can read its
     predecessor's row before its own first beat); missing at the previous measurement too is a
     Problem. The heartbeat lane has no cell, missing or not."""
     old = {lane: _lane() for lane in plat.WORKER_LANES if lane not in ("notifications", "push", "heartbeat")}
@@ -565,8 +565,8 @@ def test_a_registered_lane_missing_from_the_heartbeat_is_watch_then_a_problem() 
     assert {s: c["status"] for s, c in cells.items() if c["facts"].get("missing")} == {
         "lane/notifications": "warn", "lane/push": "warn"}
     assert cells["lane/notifications"]["message"] == (
-        "missing: the heartbeat has no entry for it, so the beat is from a worker older than this "
-        "code (a deploy it lags)")
+        "missing: the heartbeat has no entry for it, so the beat is from an older process beating "
+        "beside this one (a deploy overlap)")
     assert "lane/heartbeat" not in cells
     assert out["status"] == "warn"
 
