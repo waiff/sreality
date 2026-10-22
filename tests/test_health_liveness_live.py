@@ -250,13 +250,12 @@ def test_a_dead_worker_folds_its_keys_and_its_lane_into_its_cell(cur):
 
 
 def test_the_api_runs_no_matcher_so_no_lease_is_judged(cur):
-    """655: the producers run on the worker's lane alone (notifications W2b), so a lease nothing renews is no cell,
-    and an `api` incident opened before 655 recovers through the open-incident arm like any subject."""
+    """655: the producers run on the worker's lane alone (notifications W2b), so no `api` cell is judged (656 dropped
+    the lease and its settings), and an `api` incident opened before 655 recovers through the open-incident arm like
+    any subject."""
     _beat(cur, "liveness-test-fresh", "0 minutes")
-    cur.execute("update notification_matcher_lease set holder = 'matcher:gone', "
-                "expires_at = now() - interval '1 day' where id = 1")
-    cur.execute("insert into app_settings (key, value) values ('notifications_matcher_interval_seconds', '300') "
-                "on conflict (key) do update set value = excluded.value")
+    cur.execute("select to_regclass('public.notification_matcher_lease')")
+    assert cur.fetchone()[0] is None
 
     status, _value, _details, cells = _liveness(cur)
     assert status == "ok"

@@ -367,9 +367,9 @@ def test_acting_never_reaches_the_owners_identity_scoped_rows(
                 "VALUES (%s, 's', '{}')", (a.acc,))
     cur.execute(
         "INSERT INTO notification_dispatches (source_kind, collection_id, change_kind, account_id, "
-        "dedupe_key) VALUES ('share', %s, 'shared', %s, %s), ('share', NULL, 'shared', %s, %s)",
-        (d_coll, a.acc, f"share:collection:{d_coll}:{a.acc}", a.acc,
-         f"share:pipeline:{c.acc}:{a.acc}:edit"),
+        "actor_account_id, event_ref) VALUES ('share', %s, 'shared_collection', %s, %s, NULL), "
+        "('share', NULL, 'shared_pipeline', %s, %s, 'edit')",
+        (d_coll, a.acc, d.acc, a.acc, c.acc),
     )
     cur.execute(
         "INSERT INTO estimation_runs (account_id, source, mode, status, input_spec) "

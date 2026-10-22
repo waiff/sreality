@@ -2235,11 +2235,18 @@ renumber.** Navigate by area:
     `or(col.is.null,col.not.in.(…))` in PostgREST), because an exclude subtracts what it MATCHES
     and the bare spelling made "not Prague" quietly mean "not Prague AND located".
     `notification_dispatches` is the **unified notification event table** (migration 206 —
-    physical name kept; conceptually "notifications"): one source-generic, append-only event row per
+    physical name kept; conceptually "notifications"): one source-generic event row per
     `(source_kind ∈ {watchdog, collection_monitor, share}, subject,
-    change_kind)` — **property-grain** for the first two, a text row for `share` (`system_health`, the
-    fourth until W1, is closed history: no writer, hidden by migration 651, deleted in W6; the
-    `SourceKind` alias in `api/notifications.py` is the list),
+    change_kind)` — **property-grain** for the first two; a `share` row stores no text (its sender is
+    `actor_account_id`, named in the bell through `share_party_emails()` while a share joins the two
+    accounts, or while the sharer stands in the reader's own delegated-edit ledger, and the shared thing
+    by its live name). The table is **append-only for its producers' events since W3** (migration 653:
+    a merge marks a duplicate, never deletes). Rows deleted on record: migration 204's orphan repair
+    (twins of re-pointed rows), the pre-W3 merge carrier's twin collapse, and ruling R2 (b)'s
+    `system_health` history (the fourth producer until W1, ~900 rows, never read; migration 656,
+    2026-10, after the `backup_before_drop.yml` backup labelled `notifications-w6`); account and
+    collection deletion still cascade. Since 656 the account trigger raises and the CHECKs refuse any
+    other source or kind (the `SourceKind` alias in `api/notifications.py` is the list). Rows are
     deduped by **ONE event identity** (notifications W3, migration 653): the unique index
     `notification_dispatches_identity_uq` over `EVENT_IDENTITY` (`api/notifications.py`) =
     `(account_id, source_kind, subscription_id, collection_id, change_kind, property_id, event_ref,
@@ -2247,16 +2254,16 @@ renumber.** Navigate by area:
     once ever per property, a price step **once per snapshot** (`event_ref`), so a property that keeps
     dropping fires once per real cut — and so does the collection-monitor producer. Every producer
     INSERT and the share grant end in `ON CONFLICT (<EVENT_IDENTITY>) WHERE duplicate_of IS NULL DO
-    NOTHING` (`ON_EVENT_CONFLICT`, a test pins all of them and the index to one tuple); nothing writes
-    the pre-W3 `dedupe_key` (nullable since 653; its UNIQUE and column go in W6) or
-    `trigger_snapshot_id`, and nothing parses a key (F24). **The producers run on ONE
+    NOTHING` (`ON_EVENT_CONFLICT`, a test pins all of them and the index to one tuple); the pre-W3
+    `dedupe_key` (with its UNIQUE) and `trigger_snapshot_id` were dropped by migration 656, and nothing
+    parses a key (F24). **The producers run on ONE
     clock (notifications W2a, migration 652):** the realtime worker's `notifications` lane runs
     `match_once` (step `watchdog_new`), `match_changes_once` (`price`) and
     `match_monitored_collections_once` (`monitor`) every 300 s, each step in its own transaction; a
     failing step is its own `lane/notifications/<step>` jobs cell (red alone while the others write;
     every statement commits on its own, so no INSERT's locks outlive it). It is their ONE clock: W2b
-    deleted the API's `matcher_loop`, its lease, interval readers and daily gates (the lease table and
-    six settings rows wait for W6's drop), and the jobs check reads a registered lane missing from the
+    deleted the API's `matcher_loop`, its lease, interval readers and daily gates (migration 656 dropped
+    the lease table and the six settings rows), and the jobs check reads a registered lane missing from the
     heartbeat as an older process beating beside a new one, a deploy overlap (Watch, then Problem; a
     lone worker on old code runs the old check too, so Railway's per-service commit status is its signal). **The cursor is gone:** a watchdog's `new` is ONE INSERT
     over properties first seen in the last 24 h and after its `active_since` (stamped by a trigger on
@@ -2276,7 +2283,8 @@ renumber.** Navigate by area:
     a property into one series, so two portals quoting 5.0M and 5.2M fired a drop and a rise
     on every scrape and a merge alone sent false alerts. Each row carries provenance
     (`trigger_price_czk` / `prev_price_czk`; the snapshot is its `event_ref`); since W1 (2026-10-21) producers
-    write facts only, never `channel`, `status` or `target_channels` (W6 drops them; the routing
+    write facts only, never routing (migration 656 dropped `channel`, `status`, `error_message`,
+    `target_channels`, `sreality_id`, `estimation_run_id`, `message` and the key: 24 columns -> 15; the routing
     contract of `docs/design/notifications-unified.md` is superseded by `docs/design/notifications-push/PROGRAM.md`).
     Rows are carried onto the survivor by `PROPERTY_CARRIERS`' `notification_dispatches` entry
     (rule #18, `toolkit/property_carriers.Dispatches`), so they never orphan onto a `merged_away`
@@ -2307,7 +2315,9 @@ renumber.** Navigate by area:
     096 dropped `channel` from the dedup key, so the grain could never carry a second channel —
     which is why delivery gets its own ledger.) The first ledger, `channel_sends` (Sprint N: email and
     Telegram through an outbox draining `target_channels`), never sent a row and lost every writer in
-    W1 (2026-10-21; W6 drops it). **External delivery is `notification_deliveries`** (migration 654,
+    W1 (2026-10-21); migration 656 dropped it with `notification_suppression` and
+    `resend_webhook_events` (0 rows each, ever). **External delivery is `notification_deliveries`**
+    (migration 654,
     notifications push W4; `docs/design/notifications-push/PROGRAM.md` § 3.2–3.5): ONE row per (event,
     device), `UNIQUE (notification_id, push_subscription_id)`, ending `sent | skipped | gone | failed` with
     a one-word `reason` (Apple's, an HTTP status, a transport error's class, or `seen | hidden | stale |
@@ -2338,15 +2348,16 @@ renumber.** Navigate by area:
     `listings.inactive_at` is cleared on reactivation), and `new_source` (a sibling listing on a
     new portal). It is set-based (one `INSERT…SELECT` per kind across all monitored collections),
     idempotent on the one identity (collection, kind, property, `event_ref`); until W1 it also stamped
-    `target_channels` from the collection's `notify_channels`. Every detector is **anchored on `monitor_since`**
+    `target_channels` from the collection's `notify_channels` (both dropped by migration 656). Every
+    detector is **anchored on `monitor_since`**
     (= `greatest(collection_properties.added_at, collections.monitoring_enabled_at)`, migration 230)
     so it fires only for changes observed AFTER the operator started watching that property — a
     price drop / delisting / new source that PREDATES membership never notifies (the false-positive
     the anchor closes). `monitoring_enabled_at` is stamped by a trigger on every false→true
     monitoring transition, so the anchor is correct across all write paths.
-    `broker_change` is in the `change_kind` CHECK
+    `broker_change` was in the `change_kind` CHECK
     (migration 209) but never emitted — `listing_broker_public` is current-state-only with no
-    change signal; the kind leaves in W6. **The health ladder, `system_health`,
+    change signal; migration 656 narrowed the CHECK to the nine kinds the producers write. **The health ladder, `system_health`,
     was the third producer until W1** (migration 274; reshaped by migration 619 in wave 1 of the Health
     dashboard sprint, `docs/design/health-dashboard.md`; since ruling R2b, 2026-10-21, it writes no dispatch). Its measurer is ONE registry,
     `scripts/verify_pipeline.py` `CHECKS`: each check is declared once with its class (`alarm` or
@@ -2380,8 +2391,8 @@ renumber.** Navigate by area:
     weekly for an alarm and every 24 h for a gauge. Until W1 each onset, reminder and recovery was
     also a `source_kind='system_health'` dispatch (dedupe `sys:<key>:<onset|reminder|recovery>:…`,
     `change_kind = 'system_alert'`, verbatim `message`, every property column NULL); since ruling R2b
-    (2026-10-21, superseding 2026-10-18's "bell only") it writes none, and migration 651 hides the
-    902 old rows (W6 deletes them after a backup). **Only acknowledgement silences:**
+    (2026-10-21, superseding 2026-10-18's "bell only") it writes none, migration 651 hid the old
+    rows and migration 656 deleted them after a backup. **Only acknowledgement silences:**
     `POST /admin/health/acknowledge` stamps `ops_incidents.acknowledged_at`, which stops reminders and
     the canary's e-mail (until W1 a bell read also satisfied the canary; 651 dropped 619's
     `notification_dispatches_admin_update` and narrowed `authenticated` UPDATE to `seen_at`). Reads are admin-gated: `pipeline_checks_public` serves one row per registered key
@@ -2430,10 +2441,10 @@ renumber.** Navigate by area:
     (the canary's own keys included); a dead API is visible only through `unalerted` and the canary;
     the API tells; the canary watches pg_cron, the
     teller and whether an alarm stands unacknowledged; the worker's `jobs` check watches every scheduled
-    machine, the canary's poller included (wave 3). **The `system_health` rows (history since W1) are
-    NOT property-grain** — about the pipeline, not a listing, so `listing_id` / `sreality_id` /
-    `subscription_id` / `collection_id` are all NULL and the merge reconciler has nothing to re-point
-    on them. **One incident model since wave 3 (migration 621):** the reliability
+    machine, the canary's poller included (wave 3). **The `system_health` rows (no writer since W1,
+    deleted by migration 656) were NOT property-grain** — about the pipeline, not a listing, so
+    `listing_id` / `sreality_id` / `subscription_id` / `collection_id` were all NULL and the merge
+    reconciler had nothing to re-point on them. **One incident model since wave 3 (migration 621):** the reliability
     program's `ops_incidents` signature engine (migration 462: one open row per error-TEXT
     signature, fed by `scraper.portal_runner`'s crash path, the worker's lane failures and the
     poller's job-log backstop) is deleted and its open rows closed as `retired: signature engine`;
@@ -2443,20 +2454,25 @@ renumber.** Navigate by area:
     **The third live producer is `share` (migration 610, one kind for every share since 641; dashboards since 647).**
     `api/shares.py` writes it for a collection share (`POST /collections/{id}/shares`: ONE dispatch
     per (collection, recipient) ever — the identity holds no time, so a revoke + re-share loop cannot
-    refill an inbox; `collection_id` set; "<owner email> shared
-    the collection "<name>" with you") and for a pipeline share (`POST /pipeline/shares`: one per
-    (owner, recipient, mode), written when the grant is
-    new or widens to edit; `collection_id` NULL; "<owner email> shared their pipeline with you (view
-    only|edit)") and for a dashboard share (647: once per (dashboard, recipient) ever, `collection_id`
-    NULL, "<owner email> shared the dashboard "<name>" with you") — `subscription_id` NULL, `change_kind` naming what opens
-    (`shared_collection | shared_dashboard | shared_pipeline`, migration 652, which relabelled the old `'shared'` rows; the feed's
-    `share_kind` reads it), `actor_account_id` the sharer and `event_ref` the dashboard id or the mode (the feed's `share_ref` is
-    the collection id, the actor or the event_ref, never a parsed key), the one stored copy of an email
-    in the sharing model (a snapshot at share time), in-app and pushed since W4 (collection-sharing
-    ruling 5(e)'s in-app-only superseded 2026-10-21, `docs/design/notifications-push/PROGRAM.md` § 3.1). Migration 641 renamed 610's `collection_share` rows and keys. It is stamped to
+    refill an inbox; `collection_id` set), for a pipeline share (`POST /pipeline/shares`: one per
+    (owner, recipient, mode), written when the grant is new or widens to edit; `collection_id` NULL)
+    and for a dashboard share (647: once per (dashboard, recipient) ever, `collection_id` NULL) —
+    `subscription_id` NULL, `change_kind` naming what opens (`shared_collection | shared_dashboard |
+    shared_pipeline`, migration 652, which relabelled the old `'shared'` rows; the feed's `share_kind`
+    reads it), `actor_account_id` the sharer and `event_ref` the dashboard id or the mode (the feed's
+    `share_ref` is the collection id, the actor or the event_ref, never a parsed key), and NO text:
+    since W6 the row stores no sentence and no email (migration 656 dropped `message`, which held "<owner
+    email> shared ..." snapshots). The bell composes the sentence from three feed columns read under the
+    recipient's RLS: `actor_email` (the sharer through `share_party_emails()`, NULL once no share joins
+    the two accounts, unless the sharer stands in the recipient's own delegated-edit ledger, whose stamp
+    outlives a revoke, migration 641), `share_name` (the collection's or dashboard's live name, NULL once
+    the recipient cannot read it) and `share_mode` (a pipeline share's mode). In-app and pushed since W4
+    (collection-sharing ruling 5(e)'s in-app-only superseded 2026-10-21,
+    `docs/design/notifications-push/PROGRAM.md` § 3.1); the push names what opens, never who. Migration
+    641 renamed 610's `collection_share` rows and keys. It is stamped to
     the RECIPIENT by the route on the service role (tenants hold no INSERT on the table), and the
     `sync_notification_dispatches_account_id()` trigger KEEPS the supplied account for this kind
-    and raises when none is supplied. Like `system_health` it is NOT property-grain
+    and raises when none is supplied. Like the deleted `system_health` rows it is NOT property-grain
     (`property_id` NULL), so no carrier touches it. ONE `SourceKind` alias in
     `api/notifications.py` names the kinds every list/unread/mark route accepts.
     The unified in-app **Notifications**
@@ -2596,8 +2612,8 @@ renumber.** Navigate by area:
     routes `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
     browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
     `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
-    rule #16; `notify_channels`, its old delivery-channel pick, is neither read nor written since
-    W1 and W6 drops it); a protected default "monitoring" collection (`is_system=true`, can't be
+    rule #16; `notify_channels`, its old delivery-channel pick, was dropped by migration 656); a
+    protected default "monitoring" collection (`is_system=true`, can't be
     renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
     Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
     sole pipeline affordance), the listing-detail header (`CollectionSaveToggle`; the page's second

@@ -62,8 +62,9 @@ the parent is merely shared with it (migration 610) — and `WITH CHECK` refuses
 insert **fails closed** — a `with check (true)` here would instead silently write invisible orphan rows.
 Service-role writers bypass RLS entirely but still get correctly-stamped rows because
 their parent lookups see every row. Since migration 651 (notifications W1), `authenticated` may UPDATE only `seen_at`
-on `notification_dispatches` (619 also granted `estimation_run_id`), and no account reads or updates SYSTEM-account
-rows: 651 dropped `notification_dispatches_tenant_read`'s platform-admin SYSTEM arm and `notification_dispatches_admin_update`.
+on `notification_dispatches`, and no admin arm reads or updates another account's rows (651 dropped 619's two). Since
+656 the dispatch trigger stamps no SYSTEM account: it raises for any source but `watchdog` / `collection_monitor` /
+`share` (656 deleted the system_health history, ruling R2 (b)), so every dispatch is one account's own.
 
 **Migration 294 — pipeline tables**: `property_pipeline`, `pipeline_stages`,
 `property_pipeline_events`, plus the signup trigger:
@@ -162,8 +163,11 @@ there (`docs/design/pipeline-sharing.md` §3.7; pinned offline by
 - **One notification kind.** `notification_dispatches.source_kind = 'share'` for every kind
   (`collection_id` set for a collection share, NULL for a pipeline or dashboard share; 641 renamed
   `collection_share`); `api/shares.py` writes all three with `change_kind` `shared_<collection|pipeline|dashboard>`
-  (652), the sharer as `actor_account_id` and the dashboard id or the mode as `event_ref`, conflicting on the
-  one event identity (`EVENT_IDENTITY`, migration 653; no `dedupe_key` since W3), so a share notifies once per
+  (652), the sharer as `actor_account_id` and the dashboard id or the mode as `event_ref` and NO text (656 dropped
+  `message`: the bell names the sharer through `share_party_emails()`, so the address drops out once no share joins the
+  two, unless the sharer is an actor in the recipient's own `delegated_edits` ledger, whose stamp outlives a revoke; and
+  the thing by its live name), conflicting on the
+  one event identity (`EVENT_IDENTITY`, migration 653; 656 dropped `dedupe_key`), so a share notifies once per
   identity: (recipient, collection or dashboard, actor), and for a pipeline (recipient, owner, mode) — a
   widening to edit is a second notification. In-app and pushed (W4; collection-sharing ruling 5(e) superseded
   2026-10-21): at most one push per (sharer, recipient) a day, the rest `skipped/capped` in the ledger, bell only (R11).

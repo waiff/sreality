@@ -48,8 +48,8 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
-# The producers whose rows the feed shows (rule 16; CHECK notification_dispatches_source_ck).
-# system_health rows are history the app no longer shows (ruling R2, notifications W1).
+# The three producers (rule 16; CHECK notification_dispatches_source_ck, narrowed by migration 656,
+# which deleted the system_health history: ruling R2 (b)).
 SourceKind = Literal["watchdog", "collection_monitor", "share"]
 SourceKindFilter = Literal[SourceKind, "all"]
 
@@ -309,7 +309,7 @@ def _row_to_sub(row: tuple[Any, ...], dispatch_count: int) -> SubscriptionRow:
 #     named, never left to the caller's policy);
 #   - not from a retired watchdog (a delete retires it, F21; its rows stay for analysis).
 # Detection still writes every row — the `reactivated` detector reads prior ones — so an undo
-# brings it back intact; a system_health row (property_id NULL) is never dismissed.
+# brings it back intact; a share (property_id NULL) is never dismissed.
 VISIBLE_SQL = (
     "d.duplicate_of IS NULL "
     "AND NOT EXISTS (SELECT 1 FROM property_dismissals pd "
@@ -476,15 +476,28 @@ _LISTING_PROJECTION = (
 # `share_kind` says what a share opens, read off its change_kind (`shared_<collection|pipeline|
 # dashboard>`, migration 652); `share_ref` its id, off the share's own columns (api/shares.py),
 # never a key: the collection id, the pipeline owner (the actor), the dashboard id (event_ref).
+# A share stores no text (F17, R11; `message` dropped by migration 656): the bell's sentence is the
+# SPA's, from `actor_email` (the sharer, through share_party_emails() exactly as
+# api/shares.party_label spells it, so it is NULL once no share joins the two accounts, unless the
+# sharer stands in the reader's own delegated-edit ledger: that arm keeps an actor's address for the
+# owner after a revoke, migration 641; a detector's row has no actor and never calls it),
+# `share_name` (the collection's or dashboard's live name, NULL once the caller cannot read it) and
+# `share_mode` (a pipeline share's mode, its event_ref).
 _DISPATCH_SELECT = (
     "d.id, d.source_kind, "
     "d.subscription_id, s.name AS subscription_name, "
     "d.collection_id, c.name AS collection_name, "
-    "d.listing_id, d.property_id, d.change_kind, d.message, "
+    "d.listing_id, d.property_id, d.change_kind, "
     "CASE WHEN d.source_kind = 'share' THEN split_part(d.change_kind, '_', 2) END AS share_kind, "
     "CASE d.change_kind WHEN 'shared_collection' THEN d.collection_id::text "
     "  WHEN 'shared_pipeline' THEN d.actor_account_id::text "
     "  WHEN 'shared_dashboard' THEN d.event_ref END AS share_ref, "
+    "CASE WHEN d.actor_account_id IS NOT NULL THEN "
+    "  (SELECT e.email FROM share_party_emails() e WHERE e.account_id = d.actor_account_id) END AS actor_email, "
+    "CASE d.change_kind WHEN 'shared_collection' THEN c.name "
+    "  WHEN 'shared_dashboard' THEN (SELECT sd.name FROM stats_dashboards sd WHERE sd.id::text = d.event_ref) "
+    "  END AS share_name, "
+    "CASE WHEN d.change_kind = 'shared_pipeline' THEN d.event_ref END AS share_mode, "
     "d.dispatched_at, d.seen_at, "
     "d.trigger_price_czk, d.prev_price_czk, "
     f"{_LISTING_PROJECTION}"
@@ -494,10 +507,9 @@ _DISPATCH_FROM = (
     "FROM notification_dispatches d "
     "LEFT JOIN notification_subscriptions s ON s.id = d.subscription_id "
     "LEFT JOIN collections c ON c.id = d.collection_id "
-    # Surrogate join (R2): safe for the whole append-only ledger, not just new
-    # rows — Phase A4's backfill left zero (sreality_id NOT NULL, listing_id NULL)
-    # rows, so no historical dispatch loses its listing fields here. A plain
-    # equality keeps this an index lookup; a COALESCE/OR fallback would not.
+    # Surrogate join (R2): Phase A4's backfill gave every historical dispatch its
+    # listing_id before migration 656 dropped the legacy sreality_id, so no row loses
+    # its listing fields here. A plain equality keeps this an index lookup.
     # ONE join, to the VIEW: the bare `listings` join it replaced was invisible to
     # the tenant role (RLS, no policy) — see _LISTING_PROJECTION.
     "LEFT JOIN listings_public lp ON lp.id = d.listing_id "
@@ -1172,8 +1184,8 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
     detector is anchored on `monitored.monitor_since`, so a change that predates the
     operator starting to watch the property never notifies.
 
-    `broker_change` is intentionally NOT emitted: there is no property-level broker nor a
-    broker-change timestamp to key a stable event off (program § 3.2 drops the kind).
+    There is no broker change: no property-level broker nor a broker-change timestamp keys a
+    stable event (migration 656 dropped the never-emitted kind from the CHECK).
     """
     # Cheap early-out: nothing monitored, nothing to do.
     with conn.cursor() as cur:

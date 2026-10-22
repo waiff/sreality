@@ -1076,10 +1076,11 @@ def test_a_new_share_writes_one_recipient_stamped_notification_and_returns_the_c
     assert sql.endswith(ON_EVENT_CONFLICT) and "epoch" not in sql and "dedupe_key" not in sql
     # The kind names what opens and the owner is the actor (migration 652); a collection share
     # needs no event_ref.
+    # No text (F17, R11): the bell labels a share from its actor and the collection's live name.
+    assert "message" not in sql
     assert params == {
         "change_kind": "shared_collection", "collection_id": 1, "actor": _OWNER,
-        "message": ' shared the collection "Byty" with you', "recipient": _RECIPIENT,
-        "event_ref": None,
+        "recipient": _RECIPIENT, "event_ref": None,
     }
     assert identity.tx == ["commit"]
     # The gate ran first, and the response is re-read on the tenant connection.

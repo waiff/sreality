@@ -307,13 +307,13 @@ def test_a_new_share_writes_one_recipient_stamped_notification_and_returns_the_d
     assert share == ("INSERT INTO stats_dashboard_shares (dashboard_id, recipient_account_id) VALUES (%s, %s) "
                      "ON CONFLICT DO NOTHING RETURNING account_id", (_ID, _RECIPIENT))
     sql, params = dispatch
-    assert "account_email(%(actor)s::uuid) || %(message)s::text" in sql
+    assert "message" not in sql and "account_email" not in sql
     assert sql.endswith(ON_EVENT_CONFLICT)
-    # No collection; the owner the trigger stamped labels the text and is the actor (migration 652).
+    # No collection and no text (F17, R11): the owner the trigger stamped is the actor (migration 652),
+    # and the bell names the dashboard by its live name.
     assert params == {
         "change_kind": "shared_dashboard", "collection_id": None, "actor": _ACCT,
-        "message": ' shared the dashboard "Praha byty" with you', "recipient": _RECIPIENT,
-        "event_ref": str(_ID),
+        "recipient": _RECIPIENT, "event_ref": str(_ID),
     }
     assert identity.tx == ["commit"]
     # The gate ran first, and the answer is re-read on the tenant connection (with shared_with).

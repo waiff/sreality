@@ -87,10 +87,10 @@ def test_a_new_pipeline_share_upserts_the_mode_and_notifies_once_per_owner_recip
     assert "VALUES ('share', %(collection_id)s::bigint, %(change_kind)s::text," in sql
     assert sql.endswith(ON_EVENT_CONFLICT) and "dedupe_key" not in sql
     # The kind names what opens, the actor is the owner (migration 652), the mode tells two apart.
+    assert "message" not in sql
     assert params == {
         "change_kind": "shared_pipeline", "collection_id": None, "actor": _OWNER,
-        "message": " shared their pipeline with you (view only)", "recipient": _RECIPIENT,
-        "event_ref": "read",
+        "recipient": _RECIPIENT, "event_ref": "read",
     }
     assert identity.tx == ["commit"]
 
@@ -99,7 +99,6 @@ def test_widening_to_edit_notifies_and_narrowing_or_repeating_does_not():
     widened = ScriptConn([_lookup([(_RECIPIENT,)]), _upsert([(False,)])])
     shares.grant(_Opener(widened), "b@x.cz", shares.PipelineShare(_OWNER, "edit"))
     [(_sql, params)] = _dispatches(widened)
-    assert params["message"] == " shared their pipeline with you (edit)"
     assert params["event_ref"] == "edit" and params["actor"] == _OWNER
 
     narrowed = ScriptConn([_lookup([(_RECIPIENT,)]), _upsert([(False,)])])

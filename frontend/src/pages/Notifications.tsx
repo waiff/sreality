@@ -363,18 +363,41 @@ function RowTime({ iso }: { iso: string }) {
   );
 }
 
-/* What each share kind's link says, and the text when the API sent none. */
+/* What each share kind's link says. */
 const SHARE_META = {
-  collection: { open: 'Open collection', fallback: 'A collection was shared with you.' },
-  pipeline: { open: 'Open pipeline', fallback: 'A pipeline was shared with you.' },
-  dashboard: { open: 'Open dashboard', fallback: 'A dashboard was shared with you.' },
+  collection: { open: 'Open collection' },
+  pipeline: { open: 'Open pipeline' },
+  dashboard: { open: 'Open dashboard' },
 } as const;
 
+/* A share's sentence, from the sharer and the live name (migration 656: no text
+ * is stored). Each part falls back on its own: the email once no share joins the
+ * two accounts, the name once the thing is no longer readable. */
+function shareSentence(d: WatchdogDispatch): string {
+  const who = d.actor_email ?? 'Someone';
+  switch (d.share_kind) {
+    case 'collection':
+      return d.share_name
+        ? `${who} shared the collection "${d.share_name}" with you`
+        : `${who} shared a collection with you`;
+    case 'dashboard':
+      return d.share_name
+        ? `${who} shared the dashboard "${d.share_name}" with you`
+        : `${who} shared a dashboard with you`;
+    case 'pipeline':
+      return `${who} shared their pipeline with you${
+        d.share_mode ? ` (${d.share_mode === 'edit' ? 'edit' : 'view only'})` : ''
+      }`;
+    default:
+      return 'Something was shared with you.';
+  }
+}
+
 /* share: someone shared a collection, their pipeline or a Stats dashboard with
- * me (migrations 610, 641, 647: one kind, one renderer). A text row (the API's
- * `message` names the owner and what was shared); pressing the text marks it
- * read, the link marks it read and opens what dispatchTarget names. Two sibling
- * controls, never a link inside a button; no link when there is nothing to open. */
+ * me (migrations 610, 641, 647: one kind, one renderer). A text row (shareSentence
+ * names the owner and what was shared); pressing the text marks it read, the link
+ * marks it read and opens what dispatchTarget names. Two sibling controls, never a
+ * link inside a button; no link when there is nothing to open. */
 function ShareNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
   const markSeen = useMarkSeen(d);
   const unread = d.seen_at == null;
@@ -397,7 +420,7 @@ function ShareNotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
           {meta.label}
         </span>
         <span className="min-w-0 flex-1 text-sm text-[var(--color-ink)] break-words max-md:flex-none">
-          {d.message ?? kind?.fallback ?? 'Something was shared with you.'}
+          {shareSentence(d)}
         </span>
       </button>
       {kind && to !== FEED && (

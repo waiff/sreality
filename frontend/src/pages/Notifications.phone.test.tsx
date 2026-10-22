@@ -39,7 +39,9 @@ const row: WatchdogDispatch = {
   collection_name: 'Vinohrady investice',
   property_id: 999,
   change_kind: 'price_drop',
-  message: null,
+  actor_email: null,
+  share_name: null,
+  share_mode: null,
   share_kind: null,
   share_ref: null,
   dispatched_at: '2026-10-21T10:00:00+00:00',
@@ -76,7 +78,9 @@ const share: WatchdogDispatch = {
   price_czk: null,
   prev_price_czk: null,
   trigger_price_czk: null,
-  message: 'owner@example.com shared the collection "Vinohrady" with you',
+  actor_email: 'owner@example.com',
+  share_name: 'Vinohrady',
+  share_mode: null,
 };
 
 const originalMatchMedia = window.matchMedia;

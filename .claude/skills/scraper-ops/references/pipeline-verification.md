@@ -693,7 +693,7 @@ assertion fails, 0 otherwise:
 | `alarms_acknowledged` | an alarm-class cell incident is open and unacknowledged and its latest rung (`ops_incidents.alerted_at`: the onset, or the 6 h, 24 h, 72 h or weekly reminder) is at least 15 min and at most 12 h old; the line names the key and the rung's age | system alerts reach no bell or phone (ruling R2b, 2026-10-21), so this red run's e-mail is how an alarm reaches the operator |
 
 Since W1 (2026-10-21) the fourth assertion reads `ops_incidents` and the registry's class only: no
-`channel_sends`, no `seen_at`, no dedupe key. Gauges are never asserted: a gauge's rungs show on Health once a day (Q2),
+`seen_at` and no bell row (migration 656 dropped `channel_sends`, the dedupe key and the system rows). Gauges are never asserted: a gauge's rungs show on Health once a day (Q2),
 and the e-mail path is for alarms. So an unacknowledged alarm reddens every canary run from 15 min
 to 12 h after its onset and after each reminder rung, and GitHub emails a red scheduled run to
 whoever last changed its cron line: at the first canary run after the onset, and again after each

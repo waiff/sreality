@@ -382,3 +382,35 @@ def test_the_owner_can_revoke_and_deleting_the_dashboard_ends_its_shares(
     with svc.cursor() as cur:
         cur.execute("SELECT count(*) FROM stats_dashboard_shares WHERE dashboard_id = %s", (world.named,))
         assert cur.fetchone()[0] == 0
+
+
+def test_a_revoke_drops_the_sharers_address_and_the_dashboards_name_from_the_bell(
+    svc: Any, tenants: dict[str, _Tenant], world: _World,
+) -> None:
+    """R11 (migration 656: no text is stored): the recipient's share row names the sharer and the dashboard
+    while the share stands; once the owner revokes it both read NULL (no share joins the two accounts, the
+    dashboard is unreadable) and the row stays the recipient's. Written by the API's own insert."""
+    from api import shares
+    from api.notifications import _fetch_dispatch
+
+    a, b = tenants["a"], tenants["b"]
+    with svc.cursor() as cur:
+        cur.execute(shares._INSERT_SHARE_DISPATCH_SQL,
+                    shares._share_dispatch("shared_dashboard", None, a.acc, b.acc, str(world.named)))
+        cur.execute("SELECT id FROM notification_dispatches WHERE account_id = %s AND event_ref = %s",
+                    (b.acc, str(world.named)))
+        did = cur.fetchone()[0]
+    try:
+        def labels() -> tuple[Any, ...]:
+            with scoped(b.user) as conn:
+                row = _fetch_dispatch(conn, str(did))
+            assert row is not None, "the recipient lost its own notification"
+            return row["actor_email"], row["share_name"], row["share_kind"], row["share_ref"]
+
+        assert labels() == (a.email, "Praha byty", "dashboard", str(world.named))
+        with scoped(a.user, method="DELETE") as conn:
+            assert shares.revoke_dashboard(conn, str(world.named), str(b.acc)) == {"deleted": True}
+        assert labels() == (None, None, "dashboard", str(world.named))
+    finally:
+        with svc.cursor() as cur:
+            cur.execute("DELETE FROM notification_dispatches WHERE id = %s", (did,))
