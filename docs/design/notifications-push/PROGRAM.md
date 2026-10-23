@@ -84,7 +84,7 @@ Both tables: RLS on, no browser grant, in `_ADMIN_ONLY_RELATIONS`; neither names
 - **`push`, constant 15 s.** One brake: remove `VAPID_PRIVATE_KEY` from the worker; the lane reports "unconfigured" (a warn cell, §3.9).
 - **No lock:** producers are idempotent on the identity index; the claim is a compare-and-set.
 - **The API keeps** the health teller (a dead worker cannot silence its own alarms) and `shares.grant`; `NOTIFICATIONS_MATCHER_DISABLED` becomes `HEALTH_TELLER_DISABLED` (W2b).
-- **Deleted:** matcher_loop, the lease, 4 readers, 3 wrappers, 2 daily gates, the outbox loop and its 4 switches, 621's "api" cell. The lane check fails when a LANES entry is missing from the heartbeat, so a worker lagging a deploy shows red.
+- **Deleted:** matcher_loop, the lease, 4 readers, 3 wrappers, 2 daily gates, the outbox loop and its 4 switches, 621's "api" cell. The lane check reads a LANES entry missing from the heartbeat as Watch, then Problem, so an older process beating beside a new one (a deploy overlap) shows red; a lone worker on old code runs the old check too, so Railway's per-service commit status is its signal, which the W2b gate checks.
 
 ### 3.4 Push transport and delivery
 **`api/push.py`, ~85 lines:** RFC 8291 aes128gcm (matches the RFC vector) and RFC 8292 VAPID ES256 on the installed `cryptography` + PyJWT.
@@ -226,7 +226,7 @@ Decided by your brief: shares are pushed; push is for the iPhone, an app rule (t
 - **Three-strike rule:** always-show handler, harness, declarative payloads, a 24 h head start.
 - **The domain move orphans subscriptions:** the cutover runbook ends all devices; users re-add the app.
 - **Watchdog push is unexercised** (0 watchdogs): W2a's replay sizes it.
-- **The worker is the only alert host:** heartbeat restarts, stall, recall and missing-lane cells, and the API's teller cover it.
+- **The worker is the only alert host:** heartbeat restarts, stall, recall, the missing-lane cell (an older process beating beside a new one) and the API's teller cover it; a lone worker left on old code shows only in Railway's per-service commit status.
 - **W2b → W3:** until Migration C, an identity clash fails a step loudly, never tells twice.
 - **VAPID rotation kills every subscription:** rotate only on a leak. **Rebases:** W2 rebases onto draft #1937. **iOS bug 263687:** fallback taps may open the start page.
 

@@ -965,8 +965,8 @@ def test_the_notifications_lane_ticks_on_a_constant_between_autodedup_and_push()
 
 
 def test_the_lanes_steps_bind_to_the_real_producers() -> None:
-    """The steps name api.notifications' public producers (the API's matcher_loop calls the same
-    three until W2b); binding them keeps a rename from leaving the lane calling nothing."""
+    """The steps name api.notifications' public producers, which nothing else calls since W2b;
+    binding them keeps a rename from leaving the lane calling nothing."""
     from api import notifications
 
     assert list(rw.NOTIFICATIONS_STEPS) == ["watchdog_new", "price", "monitor"]

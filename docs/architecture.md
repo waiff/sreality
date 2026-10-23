@@ -2367,8 +2367,11 @@ renumber.** Navigate by area:
     `match_once` (step `watchdog_new`), `match_changes_once` (`price`) and
     `match_monitored_collections_once` (`monitor`) every 300 s, each step in its own transaction; a
     failing step is its own `lane/notifications/<step>` jobs cell (red alone while the others write;
-    every statement commits on its own, so no INSERT's locks outlive it); the API's `matcher_loop`
-    runs the same three beside it until W2b. **The cursor is gone:** a watchdog's `new` is ONE INSERT
+    every statement commits on its own, so no INSERT's locks outlive it). It is their ONE clock: W2b
+    deleted the API's `matcher_loop`, its lease, interval readers and daily gates (the lease table and
+    six settings rows wait for W6's drop), and the jobs check reads a registered lane missing from the
+    heartbeat as an older process beating beside a new one, a deploy overlap (Watch, then Problem; a
+    lone worker on old code runs the old check too, so Railway's per-service commit status is its signal). **The cursor is gone:** a watchdog's `new` is ONE INSERT
     over properties first seen in the last 24 h and after its `active_since` (stamped by a trigger on
     create, on every switch-on and on every filter edit: an edited watchdog is a new start), images-first gated (a hold ends inside the window, so it never loses a property), so a
     late-matching property under a day old still fires and a resumed watchdog never floods; `price` is
@@ -2479,7 +2482,9 @@ renumber.** Navigate by area:
     clock: every statement's `statement_timeout` is the check's remaining budget (wave 2); its
     thresholds live once, in `THRESHOLDS`, each with its basis, and nothing overrides them (wave 3).
     Measuring writes no system alert and reds no run. The ONE teller is
-    `toolkit/system_alerts.reconcile`, run by the API every 60 s beside the watchdog matcher:
+    `toolkit/system_alerts.reconcile`, run by the API every 60 s (`api/system_alerts_loop.py`, the
+    API's only background loop since W2b and off under `HEALTH_TELLER_DISABLED`; it stays off the
+    worker so a dead worker cannot silence its own alarms):
     it keeps one `ops_incidents` row per failing cell (signature `cell:<key>:<subject>`) — a
     measured `fail` opens it, `warn` keeps it open, an OK measured across the hold — two cadences
     less the due slack, never under 30 min — closes it (the newest OK's `run_at` at least the hold
@@ -2518,11 +2523,10 @@ renumber.** Navigate by area:
     and the API and writes ONE `liveness` result per call (host `pg_cron`; no incident, no notice —
     the teller tells it like any check): a `worker` cell per worker (heartbeat over 10 min old), a
     `health_lane` cell (the worker's health lane, silent for 10 min), a `stale:<key>` cell per alarm
-    past its staleness budget (worker keys fold into a failing `worker` cell), an `api` cell (the
-    watchdog matcher's lease lapsed; a NULL lease left by a clean shutdown is Not measured;
-    interval 0 = off) and an `unalerted` cell (an alarm cell measured failing now and two cadences
-    ago with no open incident); a subject that stops failing reads `ok` while its incident is open,
-    so it recovers on a measured OK. It replaced the `worker_liveness` check and migration 274's 24 h
+    past its staleness budget (worker keys fold into a failing `worker` cell) and an `unalerted` cell
+    (an alarm cell measured failing now and two cadences ago with no open incident; the `api` cell,
+    which judged the watchdog matcher's lease, went with the matcher in W2b, migration 655); a
+    subject that stops failing reads `ok` while its incident is open, so it recovers on a measured OK. It replaced the `worker_liveness` check and migration 274's 24 h
     dead-man job (`emit-verification-stale-alert`, unscheduled by 620; its function goes in 624). **The
     canary** is the ONE monitoring workflow, `verify_pipeline.yml` (cron hourly; GitHub delivers
     about five runs a day): it records every other workflow's production runs (the poller: event
@@ -2535,8 +2539,9 @@ renumber.** Navigate by area:
     of the poller or the harness or the harness step overrunning its 6 minutes, so GitHub's failure email is
     the one path to the operator that needs neither Supabase's scheduler nor Railway — with system
     alerts out of the bell (R2b), it is how an alarm leaves the app, at today's rhythm (R9a). Who
-    watches whom: pg_cron watches the worker, the API's loops, the teller and every alarm's
-    freshness (the canary's own keys included); the API tells; the canary watches pg_cron, the
+    watches whom: pg_cron watches the worker, the teller (`unalerted`) and every alarm's freshness
+    (the canary's own keys included); a dead API is visible only through `unalerted` and the canary;
+    the API tells; the canary watches pg_cron, the
     teller and whether an alarm stands unacknowledged; the worker's `jobs` check watches every scheduled
     machine, the canary's poller included (wave 3). **The `system_health` rows (history since W1) are
     NOT property-grain** — about the pipeline, not a listing, so `listing_id` / `sreality_id` /

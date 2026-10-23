@@ -1485,7 +1485,7 @@ def test_migration_drift_only_warns_when_a_migration_is_half_present() -> None:
     file. Ambiguity warns; it must not page anyone at 3am."""
     migs = load_migrations(_MIGRATIONS_DIR, newest=T["migration_drift_window"])
     # The missing object must be declared by no other file in the window: a function that a later
-    # migration restates (health_liveness: 620, 621, 633) would make those files fully absent.
+    # migration restates (health_liveness: 620, 621, 633, 655) would make those files fully absent.
     declared = Counter((o.kind, o.ident) for m in migs for o in m.objects)
     multi, gone = next((m, o) for m in migs if len(m.objects) >= 2
                        for o in m.objects if declared[(o.kind, o.ident)] == 1)

@@ -32,8 +32,8 @@ that overlays estimates on portal pages.
 
 A **dark-by-default always-on worker** (`scraper/realtime_worker.py`, a 2nd Railway service from the SAME image, gated by
 `REALTIME_WORKER_ENABLED`) runs every lane registered in `_amain`: the latency layer over the GH crons (newest-first probes, bounded
-detail drain, images-first downloads, sreality count-probe), plus property/broker maintenance, estimation jobs, location resolve/intake/
-refetch, sold comps, text extraction, health checks, autodedup, notification producers and heartbeats (`docs/design/realtime-scrapers.md`).
+detail drain, images-first downloads, sreality count-probe), plus property/broker maintenance, estimation, location resolve/intake/refetch,
+sold comps, text extraction, health checks, autodedup, notification producers (their one clock) and push, heartbeats (`docs/design/realtime-scrapers.md`).
 ## Territories
 
 Three top-level territories with deliberately different rules — identify which one a task is

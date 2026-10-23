@@ -1,6 +1,6 @@
 ---
 name: scraper-ops
-description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing portal HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/VERIFY/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/broker-maintenance/estimation/location-resolve/location-intake-fast/location-refetch/sold-comps/text-extract/health/autodedup/notifications/push/heartbeat lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (parked) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, delist_policy, presence check, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, health_canary, health_liveness, health lane, job cell, reason line.
+description: Use when running, debugging, or extending the scrapers — triggering the per-portal index-walk/detail-drain workflows, adding a new scraper field without breaking data, refreshing portal HTML fixtures, reading the pipeline logs (INDEX/ENQUEUE/VERIFY/DRAIN/IMAGES line shapes), the always-on real-time worker (probe/drain/images/count-probe/property-maintenance/broker-maintenance/estimation/location-resolve/location-intake-fast/location-refetch/sold-comps/text-extract/health/autodedup/notifications/push/heartbeat lanes), the visual-signal producer jobs (image pHash, CLIP tagging/retag, DINOv3 corpus embedding on RunPod), or the pipeline verification/alerting harness. Also covers condition-scoring (parked) and image-download workflow cadence. Triggers on: index_walk, detail_drain, gh workflow run, delist_policy, presence check, scrape_runs, fixtures, RUN done, a new listings column, onboarding a portal, reading a scrape log, realtime_worker, sold_comps, clip_tag, dinov3_embed_backfill, compute_image_phash, verify_pipeline, health_canary, health_liveness, health lane, job cell, missing lane, match_once, reason line.
 ---
 
 # Scraper operations
@@ -381,16 +381,15 @@ Per-lane notes:
   `location_readings_fast`, log `INTAKE readings fast ids=…`, heartbeat `last.readings_fast`, off:
   `LOCATION_READINGS_FAST_ENABLED=0`; the hourly claim run is the backstop).
   Needs `OPENAI_API_KEY`; a pass the provider stopped (`last.fatal`: credit, quota, key) is a FAILED pass (`failed_passes`, `failing_since`, `last_error`, same interval; `aborted` with no `fatal` = its own $/time ceiling, not a failure); rails = the `text_extraction` gauge (new ads' flow, the backlog's ETA), the `jobs` check's `lane/text_extract` cell and, for a provider stop, the `llm` credit cell. Sizing, cache key, write gate: `llm-pipelines`.
-- **Notifications lane** (notifications push W2a, `docs/design/notifications-push/PROGRAM.md` § 3.3) — the three producers of
-  `api/notifications` on ONE clock: CONSTANT 300 s, no flag/setting/env var (the brake is a deploy). Steps `watchdog_new` (`match_once`:
-  a live watchdog's matches first seen in the last 24 h and after its `active_since` (create, switch-on, filter edit), images-first
-  gated; no cursor), `price` (`match_changes_once`: one canonical-ad step fragment, 7 days, watchdogs + monitored collections) and
-  `monitor` (inactive after 24 h gone, reactivated, new_source), each on its own connection, committing per statement (one watchdog's
-  INSERT, one detector; `SET LOCAL statement_timeout` 120 s; the notification-events lock SHARED first, so a merge waits one statement
-  at most and never deadlocks, architecture § rule 16). Why steps: a step that raises or has a
-  failed statement is its own `portal_errors` entry, `lane/notifications/<step>` red alone while the others write; a stored spec the
-  matcher refuses is `last.*.subscriptions_invalid`, never red (the write routes 422 it), even when every watchdog is. Beside the
-  API's `matcher_loop` until W2b: one identity index (mig 653), so the overlap is a union; `NOTIFICATIONS` log line only on a write or a failure.
+- **Notifications lane** (notifications push W2a/W2b, `docs/design/notifications-push/PROGRAM.md` § 3.3) — the three producers of `api/notifications` on
+  their ONE clock (W2b deleted the API's `matcher_loop` and lease): CONSTANT 300 s, no flag/setting/env var (the brake is a deploy). Steps
+  `watchdog_new` (`match_once`: a live watchdog's matches first seen in the last 24 h and after its `active_since` (create, switch-on, filter edit),
+  images-first gated; no cursor), `price` (`match_changes_once`: one canonical-ad step fragment, 7 days, watchdogs + monitored collections) and
+  `monitor` (inactive after 24 h gone, reactivated, new_source), each on its own connection, committing per statement (one watchdog's INSERT, one
+  detector; `SET LOCAL statement_timeout` 120 s; the notification-events lock SHARED first, so a merge waits one statement at most and never deadlocks,
+  architecture § rule 16). A step that raises or has a failed statement is its own `portal_errors` entry, `lane/notifications/<step>` red alone while
+  the others write; a stored spec the matcher refuses is `last.*.subscriptions_invalid`, never red (the write routes 422 it), even when every watchdog
+  is. An older process without the lane, beating beside a new one (a deploy overlap), is the jobs check's missing-lane cell; a lone worker on old code runs the old check too and shows only in Railway's per-service commit status; `NOTIFICATIONS` log line only on a write or a failure.
 - **Push lane** (notifications push W4, PROGRAM.md § 3.3–3.4; `api/push_delivery.deliver_once`) — CONSTANT 15 s; the ONE brake is
   `VAPID_PRIVATE_KEY` (unset: `last.unconfigured`, no connection; unreadable: the `lane/push/key` cell). A pass: fan-out (VISIBLE unseen
   events ≤ 24 h × the account's live devices registered before each; a share past one per sharer a day = `skipped/capped`), a claim
@@ -415,7 +414,7 @@ worker's `health` lane, every 60 s under a 500 s pass budget that defers a gauge
 min(cadence / 10, 15 min)), alarms before gauges, each under a real wall clock: every statement's `SET LOCAL statement_timeout` is the
 check's time left, so an overrun is `unknown` (`timed_out`, `budget_seconds`, `elapsed_seconds`), and a check the run
 never reached writes no row and stays due; the weekly outbound-URL probe is a cadence, not a workflow. A row keeps `details.message`, `elapsed_ms` and its `cells` (one verdict per portal/job/lane/file; every measured result has them since wave 6).
-Measuring writes no system alert and reds no run: the ONE ladder, `toolkit/system_alerts.reconcile`, runs in the API every 60 s —
+Measuring writes no system alert and reds no run: the ONE ladder, `toolkit/system_alerts.reconcile`, runs in the API every 60 s (its only loop; off under `HEALTH_TELLER_DISABLED`) —
 one `ops_incidents` row per failing cell (`cell:<key>:<subject>`), one grouped onset per check, reminders until
 acknowledged on Health (Acknowledge on a check's row covers all its open incidents) — alarm
 6 h / 24 h / 72 h then weekly, gauge daily — and one recovery once an OK is measured across two cadences less the due slack, never under
@@ -438,12 +437,12 @@ missing), `publishing` (queue age, Browse visibility of new ads and of the stock
 **Quality checks (Health dashboard sprint wave 6, `scripts/checks/quality.py`, on the worker):** the `parsing` alarm (fill and vocabulary against the blessed baseline, new ads' per-m² measures, stock
 medians, location payload shape via `claims_common.PAYLOAD_SHAPE_PREDICATES`, re-snapshot churn) and the gauges `data_quality` (basis floor, area vs usable, no portal link), `location_town_coverage` (active ads only) and `text_extraction` (flow, backlog ETA), each gauge cell with a 30-day `trend` and `worse_7d`.
 **Watchers (migration 620):** pg_cron's `health_liveness()` (job `health-liveness`, every 5 min) writes one `liveness` row
-(host `pg_cron`) whose cells judge what must not judge itself: `worker` (heartbeat over 10 min old), `health_lane` (no completed pass, a pass in flight or failing for 10 min), `stale:<key>` (an alarm past its staleness budget), `api` (the watchdog matcher's lease lapsed) and `unalerted` (a
-measured Problem with no incident); the ladder tells them, and they replace `worker_liveness` and the 24 h dead-man job.
+(host `pg_cron`) whose cells judge what must not judge itself: `worker` (heartbeat over 10 min old), `health_lane` (no completed pass, a pass in flight or failing for 10 min), `stale:<key>` (an alarm past its staleness budget) and `unalerted` (a
+measured Problem with no incident; the matcher-lease `api` cell went in W2b, mig 655); the ladder tells them, and they replace `worker_liveness` and the 24 h dead-man job.
 The canary's last step, `scripts/health_canary.py`, exits 2 when the DB does not answer and 1 on any `CANARY FAIL`: the
 newest `liveness` row is 30 min old, a failing liveness cell has no incident after 15 min, or an open, unacknowledged alarm-class
 incident's latest rung (`ops_incidents.alerted_at`: onset, 6 h, 24 h, 72 h, weekly) is 15 min to 12 h old (never a gauge's). System alerts
-reach no bell (ruling R2b, 2026-10-21), so that red run's e-mail is the one external path. pg_cron watches the worker, the API and every alarm's freshness (the
+reach no bell (ruling R2b, 2026-10-21), so that red run's e-mail is the one external path. pg_cron watches the worker and every alarm's freshness (the
 canary's keys too); the canary watches pg_cron and the ladder. **Rationale, watchers, sizing: `references/pipeline-verification.md`.**
 
 ## Reading the logs

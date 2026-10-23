@@ -155,16 +155,21 @@ def _artifact(name: str = "browse_list", *, last_ok: _dt.datetime | None = None,
 def _jobs(*, workflows: list[Any] | None = None, cursor: Any = "fresh", cron: Any = None,
           lanes: dict[str, Any] | None = None, booted: _dt.datetime | None = None,
           beat_at: _dt.datetime | None = None, previous: list[dict[str, Any]] | None = None,
-          previous_at: _dt.datetime | None = None,
-          artifacts: list[Any] | None = None) -> tuple[dict[str, Any], _Conn]:
-    """check_jobs over a healthy fleet, with the parts a test names replaced."""
+          previous_at: _dt.datetime | None = None, artifacts: list[Any] | None = None,
+          whole: bool = True) -> tuple[dict[str, Any], _Conn]:
+    """check_jobs over a healthy fleet, with the parts a test names replaced. The heartbeat carries
+    every registered lane, as the worker's does from boot: those a test does not name are healthy
+    (`whole=False`: only the named ones, a beat from a worker older than this code)."""
+    if lanes is None:
+        lanes = {"probe": _lane()}
+    if whole:
+        lanes = {**{lane: _lane() for lane in plat.WORKER_LANES}, **lanes}
     cursor_rows = [(_ago(hours=1),)] if cursor == "fresh" else ([(cursor,)] if cursor else [])
     conn = _Conn({
         plat._GH_CURSOR_SQL: cursor_rows,
         plat._GH_WORKFLOWS_SQL: workflows or [],
         plat._CRON_JOBS_SQL: cron if cron is not None else [_cron()],
-        plat._HEARTBEAT_SQL: [(beat_at or _ago(seconds=20), booted or _ago(days=2),
-                               lanes if lanes is not None else {"probe": _lane()})],
+        plat._HEARTBEAT_SQL: [(beat_at or _ago(seconds=20), booted or _ago(days=2), lanes)],
         PREVIOUS_CELLS_SQL: ([(previous_at or _ago(minutes=9), previous)]
                              if previous is not None else []),
         plat._ARTIFACTS_SQL: artifacts or [],
@@ -175,11 +180,12 @@ def _jobs(*, workflows: list[Any] | None = None, cursor: Any = "fresh", cron: An
 def test_jobs_returns_the_wave_one_result_shape_with_one_cell_per_job() -> None:
     out, _ = _jobs(workflows=[_workflow()], artifacts=[_artifact()])
     assert out["check_key"] == "jobs" and out["status"] == "ok" and out["value"] == 0
+    lanes = {f"lane/{lane}" for lane in plat.WORKER_LANES if lane != "heartbeat"}
     assert set(_cells(out)) == {"gh/poller", "gh/property_maintenance", "cron/browse-list-rebuild",
-                                "lane/probe", "artifact/browse_list"}
+                                "artifact/browse_list"} | lanes
     for cell in out["details"]["cells"]:
         assert set(cell) == {"subject", "portal", "status", "value", "unit", "message", "facts"}
-    assert out["message"].endswith("5 OK.")
+    assert out["message"].endswith(f"{4 + len(lanes)} OK.")
 
 
 def test_every_jobs_statement_runs_on_the_checks_own_clock() -> None:
@@ -537,6 +543,41 @@ def test_the_heartbeat_lane_is_the_watchers_and_the_health_lane_is_judged() -> N
     cells = _cells(_jobs(lanes=lanes)[0])
     assert "lane/heartbeat" not in cells
     assert cells["lane/health"]["status"] == "fail"
+
+
+def test_the_checks_lane_list_is_the_workers() -> None:
+    """The check mirrors scraper/realtime_worker.LANES (it never imports the worker): a lane added
+    there without here would never be missed."""
+    from scraper import realtime_worker
+
+    assert plat.WORKER_LANES == realtime_worker.LANES
+
+
+def test_a_registered_lane_missing_from_the_heartbeat_is_watch_then_a_problem() -> None:
+    """The missing-lane rule (notifications W2b): a beat without a lane this code registers comes
+    from an older process beating beside this one, e.g. one without the notifications lane, the
+    producers' one clock since the API's matcher went. Once is Watch (this worker's health lane can read its
+    predecessor's row before its own first beat); missing at the previous measurement too is a
+    Problem. The heartbeat lane has no cell, missing or not."""
+    old = {lane: _lane() for lane in plat.WORKER_LANES if lane not in ("notifications", "push", "heartbeat")}
+    out, _ = _jobs(lanes=old, whole=False)
+    cells = _cells(out)
+    assert {s: c["status"] for s, c in cells.items() if c["facts"].get("missing")} == {
+        "lane/notifications": "warn", "lane/push": "warn"}
+    assert cells["lane/notifications"]["message"] == (
+        "missing: the heartbeat has no entry for it, so the beat is from an older process beating "
+        "beside this one (a deploy overlap)")
+    assert "lane/heartbeat" not in cells
+    assert out["status"] == "warn"
+
+    before = [{"subject": "lane/notifications", "status": "warn", "facts": {"missing": True}}]
+    again = _cells(_jobs(lanes=old, whole=False, previous=before)[0])
+    assert again["lane/notifications"]["status"] == "fail"
+    assert again["lane/notifications"]["message"].endswith("; missing at the previous measurement too")
+    assert again["lane/push"]["status"] == "warn", "missing once"
+
+    back = _cells(_jobs(lanes={}, previous=before)[0])["lane/notifications"]
+    assert back["status"] == "ok" and "missing" not in back["facts"]
 
 
 def test_a_stale_heartbeat_leaves_the_lanes_to_the_watcher() -> None:
@@ -1146,7 +1187,7 @@ def test_other_lanes_errors_and_a_ceiling_bounded_text_pass_are_never_an_abort()
     for previous in (None, before):
         cells = _cells(_jobs(lanes=lanes, previous=previous)[0])
         assert {s: (c["status"], c["facts"]["last_aborted"]) for s, c in cells.items()
-                if s.startswith("lane/")} == {f"lane/{lane}": ("ok", None) for lane in lanes}
+                if s[len("lane/"):] in lanes} == {f"lane/{lane}": ("ok", None) for lane in lanes}
 
 
 def _held_abort(status: str, *conditions: str) -> list[dict[str, Any]]:

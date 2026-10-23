@@ -1,8 +1,8 @@
 """Hermetic tests for the notifications backend (Phase U2.7).
 
-Covers WatchdogFilterSpec validation + the SQL-clause generator. The
-matcher loop and FastAPI routes are integration-heavy (DB + asyncio
-lifespan) and exercised via the live deployment, not here.
+Covers WatchdogFilterSpec validation, the SQL-clause generator and the
+three producers over fake connections; the worker's notifications lane, their
+one caller, is tested in tests/scraper/test_realtime_worker.py.
 """
 
 from __future__ import annotations
@@ -696,27 +696,6 @@ def test_the_delete_route_keeps_its_contract(monkeypatch: pytest.MonkeyPatch) ->
     finally:
         app.dependency_overrides.pop(tenant_pool.tenant_conn, None)
     assert retired == ["s-1", "s-2"]
-
-
-def test_matcher_lease_cas_acquires_and_yields() -> None:
-    """The single-runner lease (migration 366) is a mig-279-shape CAS
-    UPDATE ... RETURNING: a returned row means we hold it, no row means another
-    runner does. Guards against N replicas fanning out N× market-wide scans."""
-    from api.notifications import _try_matcher_lease
-
-    acquired = _FakeConn(
-        [(lambda s: "UPDATE notification_matcher_lease" in s, [(1,)], 1)]
-    )
-    assert _try_matcher_lease(acquired, "matcher:me") is True
-    sql, params = acquired.executed[0]
-    assert "notification_matcher_lease" in sql
-    assert "RETURNING" in sql.upper()
-    assert params["holder"] == "matcher:me"
-
-    held = _FakeConn(
-        [(lambda s: "UPDATE notification_matcher_lease" in s, [], 0)]
-    )
-    assert _try_matcher_lease(held, "matcher:me") is False
 
 
 def test_a_stored_spec_with_a_chip_without_a_code_mutes_only_its_watchdog() -> None:

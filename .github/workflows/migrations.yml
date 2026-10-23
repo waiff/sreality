@@ -416,9 +416,10 @@ jobs:
         run: pytest tests/test_pipeline_checks_latest_per_key.py -q
 
       # 620's health_liveness() is the pg_cron watcher the GitHub canary asserts on: a stale heartbeat, an
-      # alarm past its budget, an expired matcher lease and a measured Problem with no incident (a failing
-      # explicit cell, since 633) each become one failing cell the ladder reads unchanged; a dead worker folds
-      # its keys into its own cell. The replay has no pg_cron, so this lane runs the function itself, in a
+      # alarm past its budget and a measured Problem with no incident (a failing explicit cell, since 633) each
+      # become one failing cell the ladder reads unchanged; a dead worker folds its keys into its own cell; since
+      # 655 no API lease is judged (the API runs no matcher), and 655's post-condition runs here, refusing a body
+      # that still reads the lease. The replay has no pg_cron, so this lane runs the function itself, in a
       # transaction that always rolls back. Migration 633's own statements run in their step, below.
       - name: The pg_cron watcher judges the watchers (migration 620)
         env:

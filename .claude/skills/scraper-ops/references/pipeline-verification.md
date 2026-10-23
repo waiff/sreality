@@ -44,7 +44,7 @@ any more: the last, `ppm2_median_shift`'s "compared NOTHING", went with that key
 wave 6, whose median-shift arm reads Not measured until 6 days of its own history exist. The harness
 writes no system alert: results become incidents through the ladder below, shown on Health and told
 outside the app only by the canary's GitHub e-mail (no bell since 2026-10-21, ruling R2b). Since wave 2 the
-pg_cron watcher `health_liveness()` (migration 620) judges whether the worker, the API, the
+pg_cron watcher `health_liveness()` (migration 620) judges whether the worker, the
 ladder and every alarm are alive, and the canary checks the watcher and the ladder from GitHub
 ("Hosts, the watcher and the canary" below). The harness exists because the pipeline
 stalled silently for two days in 2026-07 (Anthropic credit exhaustion, 38k+ failed LLM calls) and
@@ -465,9 +465,9 @@ are gone; the harness only measures.
 
 **Where it runs.** `toolkit/system_alerts.reconcile(conn)` is called every 60 s by the API's
 system-alerts loop (`api/system_alerts_loop.py`; `SYSTEM_ALERTS_INTERVAL_SECONDS = 60`, a
-constant), started in `api/main.py`'s lifespan beside the watchdog matcher and off under the same
-`NOTIFICATIONS_MATCHER_DISABLED` guard: the ladder stays off the worker, so a dead worker cannot
-silence its own alarms. A pass is one transaction under
+constant), started in `api/main.py`'s lifespan as the API's only background loop (the watchdog
+matcher went to the worker's notifications lane in W2b) and off under `HEALTH_TELLER_DISABLED`: the
+ladder stays off the worker, so a dead worker cannot silence its own alarms. A pass is one transaction under
 `pg_try_advisory_xact_lock(hashtext('health_reconcile'))` — a second caller returns zeros and
 writes nothing — and returns its counts (opened, reminded, recovered, closed silently), logged
 when any is non-zero. Its values are module constants in `toolkit/system_alerts`, spelled once
@@ -639,7 +639,6 @@ dead. Its cells judge what must not judge itself:
 | `worker` | a worker's newest heartbeat is more than 10 min old (with no heartbeat row at all, `unknown`: "no worker on record") | beats come every 30 s, the worker's watchdog exits at 300 s, a deploy gap is under 2 min |
 | `health_lane` | the health lane's own pass, read from its heartbeat entry (`details -> 'health'`, migration 621): no completed pass for 10 min, counted from the later of `last_pass_at` and the worker's `started_at` (the boot seed carries the last pass across a restart, so a restart is judged 10 min after boot, not in its first minute), a pass in flight for 10 min (`in_flight_s`: a pass skipped behind an abandoned one still records a pass) or failing for 10 min (`failing_since`, the message quoting `last_error`); `value` = minutes on that clock; emitted once the heartbeat carries a `health` entry, and folded into a failing `worker` cell. Never result rows (620 judged them): the lane writes one only for a due check, so a restart near a cycle's end read as a Problem | a pass is in flight at most 500 s, the lane's pass budget since Health dashboard sprint wave 6 (360 s in waves 4-5, 300 s in wave 3), 530 s with the heartbeat's 30 s lag; the lane sleeps its 60 s tick after each pass, so a full pass completes at most 560 s after the previous one, 590 s with the lag: both arms stay under the 10 min line, the 10 s left being the pass's own overrun (its connection and due read, each statement's 1 s floor, the daily prune); measured passes ran p50 1.9 s, max 23.1 s on 2026-10-19 |
 | `stale:<key>` | an alarm other than `liveness` whose newest measured result (ok/warn/fail written since its `declared_at`) is past its staleness budget (`public.health_stale`); with no measured result it counts from `declared_at`, so a key whose every run is Not measured is still told; facts `key`, `host`, `last_measured_at`, `budget_s` | the budget is 3 × cadence on the worker and pg_cron, cadence + 18 h on GitHub, whose crons arrive up to ~13 h late |
-| `api` | the watchdog matcher's lease (`notification_matcher_lease`) is more than 2 × `notifications_matcher_interval_seconds` (300 by default) + 60 s past its `expires_at`; a NULL `expires_at` (a clean shutdown released it) is `unknown`; interval 0 (matcher off) is `ok` with the state fact `off` | the matcher renews the lease every pass (~300.5 s apart) in the API process that also runs the ladder's loop; the lease lasts 15 min (`api/notifications._MATCHER_LEASE_TTL`), so a crashed API reads Problem about 26 min after its last renewal |
 | `unalerted` | a cell fails in an alarm's newest result (in budget, written since `declared_at`) and also failed in its newest measured result at least 2 cadences older, and has no open `cell:<key>:<subject>` incident; cells are read as the ladder reads them (the explicit `details.cells`; the implicit cell named by the key went in migration 633, Health dashboard sprint wave 6); one cell, `value` = the cells counted, its facts naming the keys and cells | a fail that has stood for two cadences has had every 60 s ladder pass in between to open its incident; like the ladder, it counts no stale or unmeasured result |
 
 While a worker's cell fails, the keys hosted on it (a host is named like its worker,
@@ -706,8 +705,9 @@ reddened a run whenever it measured a failing alarm, read or not, and could neve
 check measured elsewhere — the watcher's, or the worker's.
 
 **Who watches whom.**
-- **pg_cron** (the watcher) watches the worker (its heartbeat), the API (the matcher's lease), the
-  ladder (`unalerted`) and every alarm's freshness, the canary's GitHub-hosted keys included: a
+- **pg_cron** (the watcher) watches the worker (its heartbeat), the ladder (`unalerted`) and every
+  alarm's freshness (its `api` cell, the matcher's lease, went with the matcher in W2b, migration
+  655), the canary's GitHub-hosted keys included: a
   canary that stops running opens a `stale:<key>` incident on Health once its hourly keys pass cadence + 18 h.
 - **The API** (the ladder) turns what the watcher and the checks find into incidents and rungs, and
   keeps doing so for a dead worker because it does not run in the worker.
@@ -721,10 +721,10 @@ check measured elsewhere — the watcher's, or the worker's.
   since Health dashboard sprint wave 5 the engine check (`dedup`), and since wave 6 the `parsing` alarm
   and the quality gauges. The watcher's `health_lane` cell watches the lane.
 
-**Known gap.** A clean API shutdown leaves the lease NULL, which reads Not measured, not Problem:
-that is every deploy's normal state until the new process's first pass claims the lease. An API
-that stops cleanly and never comes back is therefore no liveness Problem by itself; it shows only
-once a liveness cell fails and finds no incident, which the canary's third assertion then emails.
+**Known gap.** Since migration 655 (notifications W2b) the watcher judges no API state: the
+matcher's lease, its only API signal, went with the matcher. A dead API (no teller) shows only
+through `unalerted`, two cadences after a cell fails with no incident, and through the canary,
+whose third assertion emails a failing liveness cell that finds no incident.
 
 ## Delivery readiness — deleted (notifications push program W1, 2026-10-21)
 
@@ -846,6 +846,7 @@ failing rule; the other lanes' `last.errors` count per-item failures inside comp
 | OK, `off` | `interval_s` ≤ 0, or the newest pass's `last.skipped == "slice<=0"` (what a drain or images pass with a slice ≤ 0 records; any other `skipped`, autodedup's included, is not off) |
 | Problem, never woke | `interval_s` is None and the worker has been up more than 15 min (`jobs_lane_boot_grace_s`) |
 | Not measured | the lane's entry has no `interval_s` key at all, which only a worker from before wave 3 writes (the seeded None, the key present and null, is "never woke"); this guards the first deploy, while the old process's beat can still be the newest row |
+| Watch, then Problem, missing | a lane in `LANES` has no heartbeat entry at all (notifications W2b): the beat is from an older process beating beside the new one (a deploy overlap); with the API's matcher gone, a worker without the `notifications` lane would leave the producers unrun and no cell would say so. Watch the first time (this worker's health lane can read its predecessor's row before its own first beat), Problem when the previous measurement read it missing too (fact `missing`); the `heartbeat` lane has no cell, missing or not. It reads another process's beat, never the checker's own: a worker wholly on old code runs the old check too, and shows only in Railway's per-service commit status |
 | Problem, late | `now − last_pass_at` > max(3 × `interval_s`, `interval_s` + 2 × `last_duration_s`, 15 min) (`jobs_lane_floor_s`), once the worker has been up longer than that bound; a lane with no pass yet counts from the worker's start; a lane with no pass in this process counts from the worker's boot, or from this check's previous measurement when the lane read off then (switched on after boot) |
 | Problem, failing | `failing_since` older than max(3 × `interval_s`, 15 min), or set at all when `interval_s` ≥ 1 h (`jobs_lane_daily_interval_s`; a daily lane passes about once per boot) |
 | Problem, in flight | a pass running more than 1,800 s (`jobs_lane_inflight_fail_s`, `LANE_PASS_TIMEOUT_SECONDS`) |
@@ -872,7 +873,7 @@ lane from the module constant `LANES` — `probe`, `drain`, `images`, `count_pro
 `broker_maintenance`, `estimation`, `location_resolve`, `location_intake_fast`, `location_refetch`,
 `sold_comps`, `text_extract`, `health`, `autodedup`, `notifications`, `push`, `heartbeat` — seeds each with `interval_s`
 None before any task starts, and asserts that the names it registers equal `LANES`; nothing imports
-the worker to learn the list. `_lane_loop` writes `interval_s` on every wake, the idle branch
+the worker to learn the list (the jobs check mirrors it as `scripts/checks/platform.WORKER_LANES`, a test pins the two). `_lane_loop` writes `interval_s` on every wake, the idle branch
 included, so an off lane reads off, not absent. Per lane: `interval_s`, `passes`, `failed_passes`,
 `last_pass_at`, `last_duration_s`, `started_at`, `in_flight_s`, `last`, `failing_since`,
 `last_error` (at most 300 characters) and, on the probe, drain, notifications and push lanes,
