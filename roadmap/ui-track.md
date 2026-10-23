@@ -14,7 +14,8 @@ toolkit work.
   one is dropped and named), a radius (250 m – 2 km, 500 m default, Browse's centre + radius square), building
   material and condition chips — under "Prodáno (trh)" (default) or "Vše". ONE neighbourhood definition
   (`lib/neighbourhood`) also seeds the explore window, which the tile's "Prozkoumat okolí" opens with the same
-  filter, lens and dashboard (the minimap's Explore area button is gone; the 5 km seed deleted). The Stats tab's
+  filter, lens and dashboard (the 5 km seed deleted). The minimap's "Explore area" went with it and came back the
+  same day as the tile button's twin (operator): one opener over one scope (`neighbourhoodExplore`). The Stats tab's
   Vzorek gains "Vše". The reas.cz sold card stays beside it.
 - **Next (offered, not built):** a true circle instead of the square (a new location predicate in the shared
   compiler, rule 16).

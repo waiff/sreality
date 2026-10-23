@@ -6,7 +6,7 @@
  * left to the user — under the Stats tab's own lens ("Prodáno (trh)" by default,
  * or "Vše"). "Prozkoumat okolí" opens the explore window over the same sample,
  * lens and dashboard: one neighbourhood, two depths. */
-import { useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { isApiConfigured } from '@/lib/api';
@@ -14,15 +14,12 @@ import { categoryMainLabel, categoryTypeLabel, enumLabel } from '@/lib/enums';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import type { BuildingMaterial } from '@/lib/filters';
 import {
-  DEFAULT_SCOPE,
   RADII_M,
   fmtRadius,
   isMarketTemplate,
   neighbourhoodFilters,
   MARKET_TEMPLATE_NAME,
   type NeighbourhoodMarket,
-  type NeighbourhoodScope,
-  type RadiusM,
 } from '@/lib/neighbourhood';
 import type { PropertyPublic } from '@/lib/queries';
 import { ROUTES, withQuery } from '@/lib/routes';
@@ -36,11 +33,11 @@ import {
 import type { ImagePublic } from '@/lib/types';
 import { Segmented } from '@/components/controls';
 import ErrorBanner from '@/components/ErrorBanner';
-import { useExploreAreaModal } from '@/components/ExploreAreaModal';
 import { MultiselectChips } from '@/components/filter-controls';
 import { SectionLabel } from '@/components/section';
 import Skeleton from '@/components/Skeleton';
 import StatsChart from '@/components/stats/StatsChart';
+import { useExploreNeighbourhood, useNeighbourhoodScope } from './neighbourhoodExplore';
 
 const options = (id: string) =>
   (FILTER_REGISTRY.filters.find((f) => f.id === id)?.enum_values ?? [])
@@ -48,28 +45,6 @@ const options = (id: string) =>
     .map((o) => ({ value: String(o.value), label: o.label_cs }));
 const MATERIALS = options('building_material') as { value: BuildingMaterial; label: string }[];
 const CONDITIONS = options('condition_match');
-
-/* The radius and the lens are this browser's habit; the building and the
- * condition belong to the property you are looking at. */
-const PREF_KEY = 'sreality.marketTile';
-const readPrefs = (): Pick<NeighbourhoodScope, 'radiusM' | 'market'> => {
-  try {
-    const raw = JSON.parse(localStorage.getItem(PREF_KEY) ?? 'null') as Partial<NeighbourhoodScope> | null;
-    return {
-      radiusM: RADII_M.includes(raw?.radiusM as RadiusM) ? (raw!.radiusM as RadiusM) : DEFAULT_SCOPE.radiusM,
-      market: raw?.market === 'all' ? 'all' : DEFAULT_SCOPE.market,
-    };
-  } catch {
-    return { radiusM: DEFAULT_SCOPE.radiusM, market: DEFAULT_SCOPE.market };
-  }
-};
-const writePrefs = (s: NeighbourhoodScope): void => {
-  try {
-    localStorage.setItem(PREF_KEY, JSON.stringify({ radiusM: s.radiusM, market: s.market }));
-  } catch {
-    /* memory only */
-  }
-};
 
 export default function MarketTile({
   property,
@@ -79,13 +54,8 @@ export default function MarketTile({
   /* The origin panel of the explore window: the photos this page already holds. */
   images: ImagePublic[];
 }) {
-  const [scope, setScopeState] = useState<NeighbourhoodScope>(() => ({ ...DEFAULT_SCOPE, ...readPrefs() }));
-  const setScope = (patch: Partial<NeighbourhoodScope>) =>
-    setScopeState((prev) => {
-      const next = { ...prev, ...patch };
-      writePrefs(next);
-      return next;
-    });
+  /* Shared with the header map's "Explore area" (./neighbourhoodExplore). */
+  const [scope, setScope] = useNeighbourhoodScope(property.property_id);
 
   /* The Stats bar's own read (same key), so a dashboard saved there is here at once. */
   const listQ = useQuery({
@@ -98,7 +68,7 @@ export default function MarketTile({
 
   const hood = useMemo(() => neighbourhoodFilters(property, scope), [property, scope]);
   const sample = useMemo(() => (hood ? marketSample(hood.filters, scope.market) : null), [hood, scope.market]);
-  const { open } = useExploreAreaModal();
+  const explore = useExploreNeighbourhood(property, images);
 
   const kind = [
     categoryMainLabel(property.category_main),
@@ -106,20 +76,6 @@ export default function MarketTile({
     property.disposition,
     property.ownership ? enumLabel('ownership', property.ownership) : null,
   ].filter(Boolean);
-
-  const explore = () => {
-    if (!hood || property.lat == null || property.lng == null) return;
-    open({
-      filters: hood.filters,
-      lat: property.lat,
-      lng: property.lng,
-      tab: 'stats',
-      market: scope.market,
-      dashboard: template?.id ?? null,
-      origin: { listing: property, images },
-      label: [property.display_label, property.disposition].filter(Boolean).join(' · ') || undefined,
-    });
-  };
 
   let body: React.ReactNode;
   if (!hood || !sample) {
@@ -165,7 +121,7 @@ export default function MarketTile({
     >
       <div className="flex flex-wrap items-baseline justify-between gap-3">
         <SectionLabel>Trh v okolí</SectionLabel>
-        {hood && (
+        {explore && (
           <button
             type="button"
             onClick={explore}

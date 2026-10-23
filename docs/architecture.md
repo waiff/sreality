@@ -1784,8 +1784,9 @@ renumber.** Navigate by area:
     `lib/neighbourhood` — the property's type, deal, disposition and ownership (one it does not state is
     left unset and named), Browse's centre + radius around it (250 m – 2 km, 500 m default, the square
     every Browse reader filters on), the user's building material and condition, under the Stats lens
-    "Prodáno (trh)" (default) or "Vše". Its "Prozkoumat okolí" opens the explore window (the one entry
-    point; the minimap carries none) over the same filter, lens and dashboard, Stats tab open.
+    "Prodáno (trh)" (default) or "Vše". Its "Prozkoumat okolí" opens the explore window over the same
+    filter, lens and dashboard, Stats tab open; "Explore area" under the minimap is its twin (operator
+    2026-10-23): one opener over one scope store, `listing-detail/neighbourhoodExplore`, lazy like the tile.
     Fotky is "Moje fotky" then the advert's photos; Cena a hodnota is, in the operator's order, the
     price history, Valuo, the registered sales (reas.cz), then our estimation chapter. The open tab
     is `?tab=` (switched with `replace`, so Back still leaves the page); an address without it opens

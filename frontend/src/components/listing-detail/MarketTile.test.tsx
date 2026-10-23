@@ -121,9 +121,9 @@ describe('<MarketTile>', () => {
     fireEvent.click(within(screen.getByRole('group', { name: 'Vzorek' })).getByRole('button', { name: 'Vše' }));
     fireEvent.click(screen.getByRole('button', { name: /Prozkoumat okolí/ }));
     const { filters } = neighbourhoodFilters(PROPERTY, DEFAULT_SCOPE)!;
-    expect(openExplore).toHaveBeenCalledWith(expect.objectContaining({
+    await waitFor(() => expect(openExplore).toHaveBeenCalledWith(expect.objectContaining({
       filters, lat: 50.1, lng: 14.45, tab: 'stats', market: 'all', dashboard: 'd-tpl',
-    }));
+    })));
   });
 
   it('says so when the property has no point', async () => {
