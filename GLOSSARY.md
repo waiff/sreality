@@ -309,6 +309,17 @@ _Avoid_: prompt, agent profile, recipe
 One execution of a workflow, with its inputs and its result. A run usually concerns one property.
 _Avoid_: job, execution, session
 
+**Runner**:
+The platform's own place where a workflow runs when a user starts it from the app or the extension,
+using the platform's skills and tools. The alternative is a run in the user's own assistant; both
+leave the same run.
+_Avoid_: agent (for the place), worker, executor, server run
+
+**Allowance**:
+The amount of AI use the platform pays for per account per month, shared by runs and the follow-up
+questions asked about them.
+_Avoid_: quota, credits, limit, budget
+
 **Area takeoff**:
 The workflow that measures a property's rentable floor areas from its plans.
 _Avoid_: offtake, area offtake
