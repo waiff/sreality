@@ -73,7 +73,7 @@ LOG = logging.getLogger("verify_pipeline")
 
 # Every threshold a check reads, each beside its basis: the one home, so changing one is a
 # reviewed PR. Nothing overrides it at run time (app_settings.pipeline_check_thresholds is
-# read by nothing since wave 3; migration 624 deletes the row).
+# read by nothing since wave 3; migration 643 deletes the row).
 THRESHOLDS: dict[str, Any] = {
     # --- jobs (platform alarm): every scheduled machine, one cell per job ------------------
     # One red loses a whole cycle at a 24 h gap: location_registry_load's lone 09-01 timeout.

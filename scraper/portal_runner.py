@@ -64,7 +64,7 @@ DRAIN_CLAIM_CHUNK = 500
 PROBE_LEASE_N = 5
 
 # The by_category key of a walk's declared total, for every portal: the first portal's name for
-# it, kept because the live health matviews (migrations 233, 354) read it until wave 9.
+# it, kept because scripts/checks/scraping.py reads it and every stored walk carries it.
 DECLARED_TOTAL_KEY = "sreality_result_size"
 
 
@@ -368,22 +368,21 @@ def _queue_presence_checks(
 
 def _queue_orphan_checks(
     portal: Portal, conn: Any, scopes: list[Scope], seen: set[Any],
-) -> tuple[int, int, int | None]:
+) -> tuple[int, int]:
     """Rule #3 made total: a walk whose EVERY unit reached the portal's end also nominates
     the active ads in no walked scope (a NULL label, an auction the walk does not ask for),
     against every id it saw. A sighting is label-blind and a unit's nomination is not, so
     without this an ad no unit covers is never checked once it leaves the index. An
     indexless portal's units cover nothing and its walk sees nothing: this is its whole
     nomination. Otherwise an empty seen set nominates nothing, as above. Returns (queued,
-    deferred, the orphans' active count)."""
+    deferred); the VERIFY line logs the orphans' active count."""
     indexless = bool(getattr(portal, "indexless", False))
     if not seen and not indexless:
         LOG.warning("VERIFY orphans skipped: the walk saw no listings")
-        return 0, 0, None
+        return 0, 0
     candidates, active_rows = db.orphan_candidates(
         conn, portal.source, scopes, seen or None, seen_key=getattr(portal, "seen_key", "native"))
-    return (*_enqueue_nominated(portal, conn, {}, candidates, active_rows, label="orphans"),
-            active_rows)
+    return _enqueue_nominated(portal, conn, {}, candidates, active_rows, label="orphans")
 
 
 def _enqueue_nominated(
@@ -404,7 +403,7 @@ def _enqueue_nominated(
 
 def _entry(
     cm: str | None, ct: str | None, *, declared: int | None, collected: int,
-    active_db: int | None, reached: bool, total_is_count: bool, upper_bound: bool,
+    reached: bool, total_is_count: bool, upper_bound: bool,
     counts: Mapping[str, int] | None = None, verified: tuple[int, int] = (0, 0),
 ) -> dict[str, Any]:
     """One scrape_runs.by_category entry: a walked unit's, or the orphans' (NULL labels, the
@@ -423,9 +422,7 @@ def _entry(
         "images_stored":        0,
         DECLARED_TOTAL_KEY:     declared,
         "collected":            collected,
-        "active_db":            active_db,
         "walk_reached_end":     reached,
-        "walk_coverage":        walk_coverage(collected, declared),
         "total_is_count":       total_is_count,
         "declared_is_upper_bound": upper_bound,
     }
@@ -543,8 +540,8 @@ def run_index_walk(
             total_enqueued += cat_counts.get("enqueued", 0)
 
             # The numeric verdict is still computed every walk -- it just does
-            # not gate any more. It is logged as an alarm below and recorded in
-            # scrape_runs.by_category so the coverage rail keeps its input.
+            # not gate any more. It is logged as an alarm below and never stored;
+            # by_category keeps the two counts it is computed from.
             coverage = walk_coverage(len(seen_ids), cat_result_size)
 
             to_verify = deferred = 0
@@ -558,7 +555,7 @@ def run_index_walk(
                     # total, which includes listings filed under no kraj at all) would
                     # trip this on every category of every walk, and an alarm that is
                     # on by construction is not an alarm. Those portals emit their own
-                    # scoped one; the number is recorded in by_category either way.
+                    # scoped one; declared and collected are recorded in by_category either way.
                     emit = LOG.info if upper_bound else LOG.warning
                     emit(
                         "COVERAGE cm=%s ct=%s: the walk reached the portal's end but "
@@ -603,7 +600,7 @@ def run_index_walk(
 
             category_aggregates.append(_entry(
                 cm_text, ct_text, declared=cat_result_size, collected=len(seen_ids),
-                active_db=active_db, reached=bool(reached_end), total_is_count=total_is_count,
+                reached=bool(reached_end), total_is_count=total_is_count,
                 upper_bound=upper_bound, counts=cat_counts, verified=(to_verify, deferred)))
 
         # Only a walk of the portal's WHOLE agenda knows an ad is in no unit: a dispatch that
@@ -613,17 +610,16 @@ def run_index_walk(
         if conn is not None and categories and ended == len(categories) and not getattr(
                 portal, "narrowed", False):
             try:
-                queued, deferred, orphan_rows = _queue_orphan_checks(
+                queued, deferred = _queue_orphan_checks(
                     portal, conn, [dict(k) for k in groups], walk_seen)
-                orphans = _entry(None, None, declared=0, collected=0, active_db=orphan_rows,
-                                 reached=True, total_is_count=total_is_count,
-                                 upper_bound=upper_bound, verified=(queued, deferred))
+                orphans = _entry(None, None, declared=0, collected=0, reached=True,
+                                 total_is_count=total_is_count, upper_bound=upper_bound,
+                                 verified=(queued, deferred))
             except Exception as exc:  # noqa: BLE001 - a nomination failure is not a walk failure
                 LOG.exception("VERIFY orphans failed: %s -- nothing nominated this walk", exc)
                 failed_categories += 1
-                orphans = _entry(None, None, declared=None, collected=0, active_db=None,
-                                 reached=False, total_is_count=total_is_count,
-                                 upper_bound=upper_bound)
+                orphans = _entry(None, None, declared=None, collected=0, reached=False,
+                                 total_is_count=total_is_count, upper_bound=upper_bound)
             category_aggregates.append(orphans)
 
         LOG.info(
@@ -1250,7 +1246,9 @@ def run_phase(
 
     The contract is now explicit: **`ended_at` means the phase completed.** A
     crash bumps `errors` and deliberately leaves `ended_at` NULL before
-    re-raising, so a crashed run lights up both arms instead of neither.
+    re-raising, so a crashed index walk never reads as a finished walk to the
+    `scraping` or `delisting` check (its walk cells keep aging). No check reads
+    `errors`.
     """
     run_id: int | None = None
     if not dry_run:

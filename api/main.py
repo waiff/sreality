@@ -120,7 +120,7 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
     error_message so the operator isn't left looking at a forever-
     pending row. scrape_runs hard-killed at the GitHub-Actions job
     timeout (which can't self-finalize) are likewise stamped with an
-    ended_at so they stop reading as 'stuck' on the Health page.
+    ended_at, so none stays open forever.
 
     The matcher loop opens its own per-pass DB connection and respects the
     `notifications_matcher_interval_seconds` knob in `app_settings`.
@@ -141,10 +141,10 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
                 bld = sweep_stuck_buildings(conn)
                 # Above every scrape job's timeout-minutes (idnes's index walk, at
                 # 240, is the binding one): the API boots on every deploy, and
-                # stamping ended_at on a RUNNING walk would make verify_pipeline
-                # report it as truncated and would hide a later crash. Healing a
-                # genuinely dead row late costs nothing — finalize re-stamps
-                # ended_at anyway.
+                # stamping ended_at on a RUNNING walk would break run_phase's
+                # contract (ended_at = the phase completed) if that walk later
+                # crashed. Healing a genuinely dead row late costs nothing —
+                # finalize re-stamps ended_at anyway.
                 scr = sweep_stuck_scrape_runs(conn, older_than_minutes=300)
             if est or bld or scr:
                 logging.info(

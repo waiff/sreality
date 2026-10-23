@@ -23,7 +23,6 @@ a plain `SET` — `SET LOCAL` outside a transaction is a silent no-op.
 
 from __future__ import annotations
 
-import ast
 import os
 import re
 from pathlib import Path
@@ -49,12 +48,6 @@ _SOURCE_TREES = ("api", "scraper", "toolkit", "scripts", "location_data", "migra
 # needs a reason and a compensating check, because the whole value of these rails is that
 # every name is verified somewhere. Keep this at zero entries if you possibly can.
 _DYNAMIC_STAMP_SITES = {
-    "scripts/refresh_image_stats.py": (
-        "loops over the module-level _MVS tuple through db.refresh_matview(conn, mv); "
-        "every member of that tuple is checked by "
-        "test_the_image_stat_matview_tuple_is_registered below, and the chokepoint "
-        "itself raises on an unregistered name"
-    ),
     "migrations/578_matview_refresh_chokepoint.sql": (
         "public.refresh_matview stamps its p_name parameter; the compensating check is "
         "the function's own guard — it RAISEs before refreshing when p_name has no "
@@ -84,11 +77,12 @@ _SQL_CALL = re.compile(
     re.IGNORECASE,
 )
 
-# The pre-441 stamp shape, still used by the three producers that carry their own inline
-# UPDATE (both blue-green rebuilds, plus refresh_llm_cost_rollups, which cannot use the
-# helper because it must pass its own watermark as complete_through). Scoped to the
-# UPDATE's own statement so an unrelated `where name = '...'` elsewhere in the same
-# function body cannot be mistaken for a stamp and mask a missing one.
+# The pre-441 stamp shape, still used by the two producers that carry their own inline
+# UPDATE (the browse_list rebuild, plus refresh_llm_cost_rollups, which cannot use the
+# helper because it must pass its own watermark as complete_through; the map's rebuild
+# went in migration 631). Scoped to the UPDATE's own statement so an unrelated
+# `where name = '...'` elsewhere in the same function body cannot be mistaken for a
+# stamp and mask a missing one.
 _INLINE_STAMP = re.compile(
     r"update\s+(?:public\.)?derived_artifacts\b[^;]*?where\s+name\s*=\s*'(?P<name>[a-z0-9_]+)'",
     re.IGNORECASE | re.DOTALL,
@@ -101,13 +95,6 @@ _SQL_REFRESH_CALL = re.compile(
     r"(?:perform|select)\s+(?:public\.)?refresh_matview\s*\(\s*(?P<arg>'[^']*'|[^,)]+)",
     re.IGNORECASE,
 )
-
-_REFRESH_OR_STAMP = re.compile(
-    r"refresh\s+materialized\s+view\s+concurrently\s+(?P<refresh>[a-z0-9_]+)"
-    r"|stamp_derived_artifact\s*\(\s*'(?P<stamp>[a-z0-9_]+)'",
-    re.IGNORECASE,
-)
-
 
 @pytest.fixture(scope="module")
 def conn():
@@ -150,7 +137,15 @@ def function_bodies(conn) -> dict[str, str]:
 # the `properties` place columns the matview depended on), and the CI replay skips
 # 510 for the same reason. The file stays on disk unedited: migrations are
 # append-only. Scanning it here would report a phantom producer.
-_RETIRED_MIGRATIONS = {"migrations/510_location_pin_audit.sql"}
+#
+# 441 is the same case: its only literal stamp calls are the six inside
+# refresh_health_matviews' body, and migration 643 (Health W9) dropped that function,
+# its six matviews and their registry rows. The helper 441 defines stays, and a
+# definition is not a call.
+_RETIRED_MIGRATIONS = {
+    "migrations/510_location_pin_audit.sql",
+    "migrations/441_stamp_derived_artifact.sql",
+}
 
 
 def _source_files() -> list[Path]:
@@ -219,20 +214,6 @@ def _catalog_call_names(bodies: dict[str, str]) -> dict[str, set[str]]:
     return out
 
 
-def _image_stat_mvs() -> list[str]:
-    """`_MVS` out of scripts/refresh_image_stats.py, read with ast (no import)."""
-    tree = ast.parse((_REPO / "scripts" / "refresh_image_stats.py").read_text("utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "_MVS" for t in node.targets
-        ):
-            return [
-                e.value for e in node.value.elts
-                if isinstance(e, ast.Constant) and isinstance(e.value, str)
-            ]
-    return []
-
-
 def test_the_scanner_finds_the_call_sites_it_is_supposed_to_check():
     """Guards every scan below against passing vacuously.
 
@@ -250,10 +231,6 @@ def test_the_scanner_finds_the_call_sites_it_is_supposed_to_check():
     assert len(literal) >= 2, (
         f"only one file in the repo stamps the registry: {sorted(literal)}. Migration "
         "441 instrumented five producers."
-    )
-    assert _image_stat_mvs(), (
-        "scripts/refresh_image_stats.py::_MVS could not be read — the compensating "
-        "check for that file's dynamic stamp call has silently stopped checking anything"
     )
 
 
@@ -280,15 +257,16 @@ def test_every_stamp_call_in_the_repo_names_a_registered_artifact(registry):
 def test_every_stamp_call_inside_the_catalog_names_a_registered_artifact(
     registry, function_bodies
 ):
-    """RED by: mistyping one of the six names inside `refresh_health_matviews`'s body.
+    """RED by: mistyping one of the two names inside `refresh_location_pin_audit_mv`'s body.
 
     The repo scan above cannot see a function body that was replaced directly against the
     database outside any migration file; this reads `pg_proc.prosrc`, so it can.
     """
     per_function = _catalog_call_names(function_bodies)
     assert per_function, (
-        "no function in the catalog stamps the registry through stamp_derived_artifact — "
-        "migration 441's cutover of refresh_health_matviews is missing"
+        "no function in the catalog stamps the registry through stamp_derived_artifact "
+        "with a literal name — refresh_location_pin_audit_mv (migration 523) lost its two "
+        "stamps, and this arm would check nothing"
     )
     unknown = sorted(
         (fn, name)
@@ -319,38 +297,25 @@ def test_the_only_dynamic_stamp_call_sites_are_the_documented_ones():
     )
 
 
-def test_the_image_stat_matview_tuple_is_registered(registry):
-    """The compensating check for scripts/refresh_image_stats.py's dynamic stamp.
-
-    RED by: adding a matview to `_MVS` without a `derived_artifacts` seed row — that
-    matview would then be refreshed every two hours and stamp nothing at all.
-    """
-    mvs = _image_stat_mvs()
-    missing = sorted(mv for mv in mvs if mv not in registry)
-    assert not missing, (
-        f"scripts/refresh_image_stats.py refreshes and stamps {missing}, which has no "
-        "derived_artifacts row — the stamp is a silent no-op for it"
-    )
-
-
 def test_every_registry_row_is_stamped_by_something(registry, function_bodies):
     """Corollary E, whole: a declared artifact whose freshness nothing writes is exactly
     the permanently-red row this wave exists to delete.
 
-    RED by: deleting any producer's stamp — the helper call in one of the four Python
-    producers, one of the six inside `refresh_health_matviews`, or one of the three
-    pre-441 inline `update derived_artifacts ... where name = '...'` blocks.
+    RED by: deleting any producer's stamp — the helper call in a Python producer, one of
+    the two inside `refresh_location_pin_audit_mv`, or one of the pre-441 inline
+    `update derived_artifacts ... where name = '...'` blocks.
 
-    Five stamp shapes count, because five genuinely exist: a literal-name call of the
+    Four stamp shapes count, because four genuinely exist: a literal-name call of the
     SQL stamp helper (migration text and catalog bodies), a literal-name
     `db.refresh_matview(conn, ...)` call (the migration-578 chokepoint stamps inside), the
     same chokepoint called from SQL with a literal name (a pg_cron command in migration
-    text, 625), `scripts/refresh_image_stats.py`'s loop over `_MVS`, and the inline UPDATE
-    that `refresh_llm_cost_rollups` and both blue-green rebuilds keep (the rollup cannot use
-    the helper — it must pass its own watermark as `complete_through`).
+    text, 625), and the inline UPDATE that `refresh_llm_cost_rollups` and the browse_list
+    rebuild keep (the rollup cannot use the helper — it must pass its own watermark as
+    `complete_through`). A fifth, scripts/refresh_image_stats.py's loop over its tuple,
+    went with its two matviews in migration 643.
     """
     literal, _ = _repo_call_sites()
-    stamped: set[str] = set(_image_stat_mvs())
+    stamped: set[str] = set()
     for names in literal.values():
         stamped |= names
     for names in _catalog_call_names(function_bodies).values():
@@ -367,7 +332,7 @@ def test_every_registry_row_is_stamped_by_something(registry, function_bodies):
 
 
 def test_every_registry_row_s_producer_exists(conn, registry):
-    """RED by: renaming `scripts/refresh_image_stats.py` (or any producer function)
+    """RED by: renaming `scripts/recompute_property_stats.py` (or any producer function)
     without updating its `derived_artifacts.producer`.
 
     `producer` is the only pointer from a stale artifact back to the thing that should
@@ -400,50 +365,6 @@ def test_every_registry_row_s_producer_exists(conn, registry):
     assert not broken, (
         "derived_artifacts.producer names something that does not exist:\n  "
         + "\n  ".join(broken)
-    )
-
-
-def test_the_six_health_matviews_are_stamped_individually(registry, function_bodies):
-    """RED by: collapsing the six stamps into one at the end of the fan-out (and by
-    dropping any single one of them).
-
-    Each matview is its own registry row with its own freshness and its own
-    `last_duration_ms`, so each gets its own stamp, immediately after its own REFRESH.
-    Today that buys six real per-matview durations — `clock_timestamp()` advances inside a
-    transaction, unlike `now()` — which is the only published answer to "which of the six
-    is the slow one", and migration 440 measured that this job's trailing-7d p95 gap is
-    77.7 minutes against a 90d p95 of 10.0.
-
-    Asserted as an exact event sequence rather than a set, because a set cannot tell
-    `refresh a; stamp a; refresh b; stamp b` from `refresh a; refresh b; stamp a; stamp b`
-    — and the second is the shape this test exists to reject.
-
-    NOT asserted, and deliberately not built: per-matview error handling. All six
-    REFRESHes and all six stamps share ONE transaction (a plpgsql function with no
-    BEGIN..EXCEPTION block opens no subtransaction), so a failure part-way rolls back the
-    refreshes together with their stamps. Stamping individually is the correct shape and
-    becomes load-bearing for partial-failure reporting only if the fan-out is ever split;
-    that is a separate, filed change.
-    """
-    body = function_bodies.get("refresh_health_matviews")
-    assert body, "refresh_health_matviews is missing from the catalog entirely"
-
-    events = [
-        ("refresh", m.group("refresh")) if m.group("refresh") else ("stamp", m.group("stamp"))
-        for m in _REFRESH_OR_STAMP.finditer(body)
-    ]
-    refreshed = [name for kind, name in events if kind == "refresh"]
-
-    declared = sorted(n for n, p in registry.items() if p == "refresh_health_matviews")
-    assert sorted(refreshed) == declared, (
-        f"refresh_health_matviews refreshes {sorted(refreshed)} but the registry declares "
-        f"it as the producer of {declared} — the two must not drift apart"
-    )
-
-    expected = [pair for mv in refreshed for pair in (("refresh", mv), ("stamp", mv))]
-    assert events == expected, (
-        "the health fan-out no longer stamps each matview immediately after its own "
-        f"REFRESH.\n  expected: {expected}\n  found:    {events}"
     )
 
 

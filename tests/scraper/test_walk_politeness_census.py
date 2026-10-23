@@ -103,7 +103,7 @@ def test_the_sighting_diff_makes_no_http_request(monkeypatch: pytest.MonkeyPatch
     groups = {portal_runner._scope_key(scope): portal_runner._ScopeGroup(left=1)}
     assert portal_runner._queue_presence_checks(
         fake, object(), {"category_main": "byt"}, scope, groups, {"a"}, "byt", "prodej") == (1, 0)
-    assert portal_runner._queue_orphan_checks(fake, object(), [scope], {"a"}) == (1, 0, 1)
+    assert portal_runner._queue_orphan_checks(fake, object(), [scope], {"a"}) == (1, 0)
 
 
 def _client_calls_without_limiter(tree: ast.AST) -> list[str]:

@@ -115,24 +115,3 @@ jobs:
 
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS
-
-  # Refresh the Health "Image mirror" matview ONCE after all shards finish,
-  # rather than 4x concurrently (REFRESH takes an exclusive lock). always() so
-  # the stats stay fresh even if some shards bailed early — the counts moved.
-  refresh-stats:
-    needs: images
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install
-        run: pip install -e .
-      - name: Refresh image-storage stats matview
-        env:
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-        run: python -m scripts.refresh_image_stats

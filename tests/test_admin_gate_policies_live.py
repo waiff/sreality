@@ -20,8 +20,11 @@ Skip behaviour: the lane sets `DB_RAILS_REQUIRED=1`, so a lane that loses its
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
+
+from tests.test_measure_registry_census import effective_sql_definitions, strip_sql_comments
 
 _DB_URL = os.environ.get("TEST_DATABASE_URL")
 _REQUIRED = os.environ.get("DB_RAILS_REQUIRED") == "1"
@@ -185,8 +188,19 @@ def test_the_gate_still_reads_live(conn):
     )
 
 
+def _gated_functions_in_migrations() -> set[str]:
+    """Function names whose effective definition names is_platform_admin() (not the gate itself)."""
+    return {
+        key.split(":", 1)[1]
+        for key, (_, stmt) in effective_sql_definitions().items()
+        if key.startswith("function:")
+        and re.search(r"\bis_platform_admin\s*\(", strip_sql_comments(stmt))
+        and key.split(":", 1)[1] != "is_platform_admin"
+    }
+
+
 def test_every_gated_function_keeps_definer_and_a_pinned_search_path(conn):
-    """The nine admin-gated reporting functions must not lose their attributes.
+    """The admin-gated functions (nine until migration 643 dropped the reporting set) keep their attributes.
 
     This is the rail that replaced wave W1b rather than performing it. W1b would have
     rewritten 34 objects (25 views + these 9 functions) to spell the gate as
@@ -219,9 +233,16 @@ def test_every_gated_function_keeps_definer_and_a_pinned_search_path(conn):
         )
         rows = cur.fetchall()
 
-    assert rows, (
-        "no admin-gated functions found — the discovery predicate stopped matching, so "
-        "this rail would pass vacuously"
+    # The expected set comes from the migrations themselves: every function whose newest
+    # `create` names the gate and is not dropped later. Comparing sets keeps the rail
+    # non-vacuous without pinning a count: the nine reporting functions of 318/332/340 went
+    # in migration 643 (Health wave 9), so the set may legitimately be empty, while a
+    # discovery predicate that stopped matching would still read as a mismatch.
+    expected = _gated_functions_in_migrations()
+    assert {name for name, _, _ in rows} == expected, (
+        "the catalog's admin-gated functions differ from the migrations' own set — either "
+        f"the discovery predicate stopped matching or a migration lost one: catalog "
+        f"{sorted(name for name, _, _ in rows)} vs migrations {sorted(expected)}"
     )
     offenders = [
         f"{name} (secdef={secdef}, config={config or 'none'})"

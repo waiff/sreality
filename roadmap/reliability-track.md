@@ -279,7 +279,7 @@ What wave 2 changed:
   budget, the API's background loops (the watchdog matcher's lease) and any measured Problem left
   without an incident. It replaces the `worker_liveness` check, a 5-minute limit GitHub sampled
   about every 4.9 hours, and the 24 h dead-man job `emit-verification-stale-alert`, which never
-  fired (unscheduled; migration 624 drops its function).
+  fired (unscheduled; migration 643 drops its function).
 - **The canary.** `verify_pipeline.yml` is the one monitoring workflow ("Monitoring: health canary
   (hourly)"): it records failed workflow runs (the poller, moved forward from wave 3, so
   `monitor_workflow_failures.yml` is deleted), measures the GitHub-hosted checks, and then
@@ -334,7 +334,7 @@ What wave 3 changed:
   provider and caller (`called_for`), and 24 h spend. One provider's success no longer hides another's outage. It
   replaces `llm_errors` and `llm_burn_rate`. `dual_write_parity` is deleted (Q6).
 - **One home for thresholds.** `THRESHOLDS` in code, each with its basis; the
-  `pipeline_check_thresholds` settings row is read by nothing (migration 624 deletes it).
+  `pipeline_check_thresholds` settings row is read by nothing (migration 643 deletes it).
 - **The heartbeat remembers.** Each lane reports its interval (so an off lane reads off), a
   failing spell with its last error, and, in the probe and drain lanes, each failing portal; at
   boot the worker carries its counters over from the previous heartbeat, so deploys reset nothing.
@@ -379,7 +379,7 @@ Owed and stated (also in the design's "As built" note):
   not retried.
 - A pg_cron tick that skips itself counts as a run and pulls the median down; the sticky
   reference only makes the comparison stricter.
-- Read by nothing after this wave, for migration 624 to drop: `app_settings.broker_resolution_last_complete`
+- Read by nothing after this wave, for migration 643 to drop: `app_settings.broker_resolution_last_complete`
   (still written by `scripts/resolve_brokers.py`; brokers territory) and the `dual_write_watermark`
   table.
 - At merge the retired keys' open incidents close silently at the canary's first run from `main`,
@@ -473,9 +473,12 @@ Owed and stated (also in the design's "As built" note):
 - Left for wave 9: the 150 ceskereality and mmreality rows of `portal_index_slices` and
   `portal_coverage_gate` (read by nothing), `portals.supports_complete_walk` (no writer now; the
   old Health page's portal posture still reads it) and `delist_flip_refusals` (still written, read
-  by nothing); only `portal_coverage_gate` is on wave 9's list so far.
-- The old page's matview checks (`delisting_latency`, `delisting_spike` and the rest) keep
-  rendering until wave 9.
+  by nothing); only `portal_coverage_gate` is on wave 9's list so far. Wave 9 as built: only
+  `portal_coverage_gate` went (migration 643); the slice rows (unjudged), `supports_complete_walk`
+  (still read, by the Scrapers page, not the old Health page) and `delist_flip_refusals` (still
+  written) stay, and the scraper track owns them.
+- The old page's matview checks (`delisting_latency`, `delisting_spike` and the rest) kept
+  rendering until wave 8 retired the page; migration 643 (wave 9) dropped their matviews.
 - At merge the seven retired keys' open incidents close silently at the canary's first run from
   `main` (`false_delist_share`'s included), and the new checks open fresh onsets where they
   measure Problem.
@@ -600,7 +603,7 @@ What Health dashboard sprint wave 6 changed:
   job is 19 min and its harness step 6 min.
 - **The registry**: 14 keys, 12 on the worker and 2 on GitHub (165 s of budgets). Nine keys retire: the
   eight legacy checks and `floor_convention` (Q4). Migration 633 also unschedules `capture-data-quality`
-  (24 failures in 30 d), and `data_quality_snapshots` stays frozen for wave 9 (Q5).
+  (24 failures in 30 d), and `data_quality_snapshots` stays as frozen history (Q5; wave 9 kept it).
 
 Owed items this closes, and one correction:
 - The design's "every check emits explicit cells" and "no legacy key remains".
@@ -725,8 +728,10 @@ its first health pass after its deploy (the four portal checks then read domain 
 only, the page in both explicit themes at 1,280 px and on the phone, and a system alert's "Open Health"
 link landing on its check.
 
-**Next:** wave 9 — drop the old health layer: its 8 matviews, 11 functions and 12 views stop costing
-database time, after a backup and 48 h with no reads of them (destructive, Q5).
+~~**Next:** wave 9 — drop the old health layer: its 8 matviews, 11 functions and 12 views stop costing
+database time, after a backup and 48 h with no reads of them (destructive, Q5).~~ Done as Health green
+sprint wave 6 (below).
+
 
 ## 2026-10-20 — Health dashboard sprint, wave 10a (shipped with this PR)
 
@@ -963,3 +968,49 @@ no workflow passed; the shared `operational_limits` row is the one override chan
   after the deploy (the new hash), mostly inside the first crossing: about one ordinary wave, so
   `parsing idnes/churn` may read red once more. The crossing after it must read ~0 foreign
   re-snapshots, and the churn incident closes on that measured OK.
+
+## 2026-10-23 — Health green sprint, wave 6: the old health layer goes (shipped with this PR)
+
+Health dashboard sprint wave 9 (#1910), parked since 10-20, rebased onto main as the green sprint's wave 6: the
+second engine behind the old Health page, which nothing has read since wave 8 rebuilt the page on one view. Plan:
+[`docs/design/health-dashboard.md`](../docs/design/health-dashboard.md) § 6, wave 9, its "As built" note, and § 14's
+"Wave 6 as built".
+
+What it changes:
+- **Dropped from the database** (migration 643, destructive, one transaction): 8 matviews, 12 views, 11 functions,
+  4 tables (`ops_incident_runs` 611 rows, the retired check results 1,822, `portal_coverage_gate` 153,
+  `dual_write_watermark` 22), the 5 columns of `ops_incidents` only the retired signature engine used, the `*/10`
+  pg_cron job `refresh-health-dashboard`, 8 of the 18 rows of the derived-artifacts registry and 3 settings rows.
+  The refresh cost 14.8 h of database time over its last measured 7 days (to 10-20).
+- **`portals.scrape_cadence_minutes` goes in its own migration, 663**, applied right after 643: the web portal's
+  migration 649 (applied before 643, replayed after it) inserts a row naming that column, and #1939's 650 must replay
+  after 643, so no one number fits both.
+- **Their writers, deleted in the same PR**: the images workflow's `refresh-stats` job with
+  `scripts/refresh_image_stats.py`; the `active_db` and `walk_coverage` keys each walk wrote into
+  `scrape_runs.by_category`, for the units and the orphans' entry (no Health check reads either; the coverage verdict
+  is still logged as `COVERAGE`, and the RECONCILE and `VERIFY orphans` lines keep their `active=` counts); the
+  broker sweep's `broker_resolution_last_complete` stamp; the per-m² census entry for a dropped matview; and the test
+  rails that listed the old objects.
+- **Kept on purpose**: `ops_incidents_open_signature_uq`, the index every new cell incident needs;
+  `data_quality_snapshots`, frozen history (Q5); and `portals.supports_complete_walk` (the Scrapers page still reads
+  it), `delist_flip_refusals` (still written) and the 150 unread ceskereality and mmreality slice rows, which stay
+  with the scraper track.
+- **Delivered in the database skill's order, not 627's**: the code still on `main` survives the drop (the image
+  refresh catches the missing matview and skips; the by_category keys are JSON; only the broker stamp would return
+  one unread row), so after the backup (label `health-legacy-643`) and a second 24 h zero-reads check, 643 and then
+  663 are applied from this branch (on or after 2026-10-23 13:00Z, Q5), and the PR merges after, before the next
+  daily broker lap (04:35 UTC).
+
+Owed and stated (also in the design's notes):
+- The backup holds no function, grant or job: the 11 function bodies stay in git (six byte for byte, five equal to
+  their last migration once whitespace and comments are stripped; their live md5s, re-read 2026-10-23, are in 643's
+  header), and there is no revert script, as for 618 and 627.
+- `ops_incidents_open_recent_idx` (migration 462) was not on the list and stays; the 132 resolved signature-engine
+  incidents stay as history (the backup keeps their dropped columns).
+
+To check after the apply: the post-apply SELECTs in the PR (every dropped object gone, the cron job gone, the
+registry at 10, `ops_incidents_open_signature_uq` present, no open non-cell incident); then, on Health's Platform
+section, Jobs and Capacity list no `cron/refresh-health-dashboard` cell, Jobs no `artifact/` cell for the eight, and
+Migration drift reads 643 and 663 Not measured (a drop declares nothing it can probe).
+
+**Next:** the green sprint's remaining waves (W3 producers, W4 location producers, W5 rulings).

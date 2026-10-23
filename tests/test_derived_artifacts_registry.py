@@ -64,11 +64,6 @@ _ROLLUP_TABLES = frozenset(
 # here instead would silence the one check that can notice it.
 _W7_BACKLOG: frozenset[str] = frozenset()
 
-_PUBLIC_VIEW_COLUMNS = [
-    "name", "producer", "host", "cadence", "staleness_budget", "complete_through",
-    "last_succeeded_at", "last_duration_ms", "last_rows", "is_serving",
-]
-
 _FORBIDDEN_COLUMNS = ("last_error", "has_error", "last_started_at")
 
 
@@ -159,11 +154,6 @@ def test_every_registry_row_declares_a_staleness_budget(registered):
     )
 
 
-def test_the_public_view_exposes_exactly_the_ten_declared_columns(conn):
-    """`.select('*')` reads this view, so its column list IS the contract."""
-    assert _columns(conn, "public.derived_artifacts_public") == _PUBLIC_VIEW_COLUMNS
-
-
 @pytest.mark.parametrize("column", _FORBIDDEN_COLUMNS)
 def test_the_unwritable_columns_stay_absent(conn, column):
     """RED by: adding `last_error` (or `has_error`, or `last_started_at`) back.
@@ -174,10 +164,6 @@ def test_the_unwritable_columns_stay_absent(conn, column):
     assert column not in _columns(conn, "public.derived_artifacts"), (
         f"derived_artifacts grew a {column} column that no producer can durably write — "
         "see this file's docstring for why the write cannot survive its own re-raise"
-    )
-    assert column not in _columns(conn, "public.derived_artifacts_public"), (
-        f"derived_artifacts_public publishes {column}, which can only ever read as "
-        "'nothing is wrong'"
     )
 
 
@@ -234,39 +220,19 @@ def test_the_singleton_state_table_is_gone(conn):
     assert view is None, "browse_read_model_state_public is back — see above"
 
 
-def test_the_public_view_has_no_union_adapter(conn):
-    """RED by: re-adding the `union all` branch migration 437 shipped as TEMPORARY.
-
-    While both the base rows and the adapter existed, `browse_list` and the map matview
-    (retired since, migration 631) appeared TWICE in derived_artifacts_public and the
-    Health panel double-rendered them.
-    The column list stays identical either way, so the column-contract test above cannot see
-    this; only the view definition can.
-    """
-    with conn.cursor() as cur:
-        cur.execute("select pg_get_viewdef('public.derived_artifacts_public'::regclass)")
-        viewdef = cur.fetchone()[0].lower()
-    assert "union" not in viewdef, (
-        "derived_artifacts_public grew a UNION branch again — every artifact it adapts is "
-        "published twice, once from its own registry row and once from the adapter"
-    )
-
-
-def test_the_registry_is_readable_only_through_the_public_view(conn):
-    """The base table stays behind RLS; the aggregate-only view is what the SPA reads."""
+def test_the_registry_base_table_stays_closed_to_browser_roles(conn):
+    """The base table stays behind RLS and unreadable by both browser roles. The browser sees an
+    artifact's freshness only as its Health cell (pipeline_checks_public); derived_artifacts_public,
+    the registry's old browser view, went in migration 643."""
     with conn.cursor() as cur:
         cur.execute(
-            "select has_table_privilege('anon', 'public.derived_artifacts_public', 'SELECT'), "
-            "       has_table_privilege('authenticated', 'public.derived_artifacts_public', 'SELECT'), "
-            "       has_table_privilege('authenticated', 'public.derived_artifacts', 'SELECT'), "
+            "select has_table_privilege('authenticated', 'public.derived_artifacts', 'SELECT'), "
             "       has_table_privilege('anon', 'public.derived_artifacts', 'SELECT'), "
             "       (select relrowsecurity from pg_class "
             "         where oid = 'public.derived_artifacts'::regclass)"
         )
-        anon_view, auth_view, auth_table, anon_table, rls = cur.fetchone()
+        auth_table, anon_table, rls = cur.fetchone()
 
-    assert anon_view is False, "derived_artifacts_public became anon-readable"
-    assert auth_view is True, "derived_artifacts_public lost its authenticated grant"
     assert auth_table is False, "authenticated reached the derived_artifacts base table"
     assert anon_table is False, "anon reached the derived_artifacts base table"
     assert rls is True, "row level security was disabled on derived_artifacts"

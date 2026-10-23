@@ -82,8 +82,8 @@ _MARKET_VIEWS: list[str] = ["property_estimates_public"]
 # data read by many legitimately open views (listings_public, properties_public,
 # browse_*, price_stat_*), so listing them would force a large, churny allowlist
 # and train people to add entries reflexively. The residual blind spot — an
-# admin-only aggregate over ONLY those tables, e.g. data_quality_by_source —
-# stays covered by the enumerated lists below.
+# admin-only aggregate over ONLY those tables (data_quality_by_source was one,
+# until migration 643 dropped it) — is covered only by the enumerated lists below.
 # Tenant tables are excluded too: they are scoped by RLS + security_invoker, a
 # different mechanism with its own tests.
 #
@@ -127,10 +127,7 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # ungated and browser-readable because this list was seeded from migration 318's
     # objects rather than a first-principles table inventory.
     "scrape_runs", "worker_heartbeats",
-    "health_summary_mv", "portal_health_mv", "scraper_health_checks_mv",
-    "category_trends_mv", "image_storage_overview_mv", "snapshot_churn_24h_mv",
     "dedup_funnel_resolutions_archive",
-    "images_failure_overview_mv",
     # The tagging bake-off store (migration 489, schema dedup_sim): experiment
     # evidence — runs, encoder arms, their vectors, per-image scores and the
     # per-head metrics. Backend-only, NO `_public` view; the bake-off page reads
@@ -212,9 +209,6 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
 # EVERY entry needs a comment justifying it — an unexplained name here is how this
 # class of bug comes back.
 _ADMIN_GATE_ALLOWLIST: list[str] = [
-    # The pg_cron refresher itself: SECURITY DEFINER, not executable by a browser
-    # role, and it must run without a JWT context to rebuild the health matviews.
-    "refresh_health_matviews",
     # The internal union source behind llm_cost_{daily,hourly}_public (migration 437).
     # Verified live at merge: relacl is {postgres,service_role} only -- no anon, no
     # authenticated, no PUBLIC -- and has_table_privilege is false for BOTH browser
@@ -826,10 +820,10 @@ def test_admin_gate_opens_for_service_but_not_role_switch(svc: Any) -> None:
     with svc.cursor() as cur:
         cur.execute("SELECT is_platform_admin()")
         assert cur.fetchone()[0] is True, (
-            "claims-less service connection is not admin — pg_cron's health "
-            "matview refresh and the golden-set freeze would read zero rows"
+            "claims-less service connection is not admin — every service-role read of "
+            "an admin-gated view would read zero rows"
         )
-        cur.execute("SELECT count(*) FROM listing_fetch_failures_public")
+        cur.execute("SELECT count(*) FROM pipeline_checks_public")
         assert cur.fetchone()[0] is not None
 
     import psycopg
@@ -1067,43 +1061,24 @@ def test_pipeline_card_read_is_account_scoped_after_respelling(
         )
 
 
-# Migration 318: admin-only operational views/functions the SPA reads directly
-# (dedup engine internals, scraper health, LLM cost, image training/labeling
-# state, workflow health) that CANNOT use migration 316's security_invoker +
-# base-table RLS policy technique, because several of them read the shared
-# `listings`/`properties`/`images` tables (which must stay universally
-# readable to every authenticated user for Browse). Instead each one embeds
-# `is_platform_admin()` directly as a query filter -- evaluated per-request,
-# independent of RLS/security_invoker/ownership.
+# Migration 318: admin-only operational views (LLM cost, the Health checks, image
+# training/labeling state, the frozen dedup verdict cache), several no longer read by
+# the SPA, that CANNOT use migration 316's security_invoker + base-table RLS policy
+# technique, because several of them read the shared `listings`/`properties`/
+# `images` tables (which must stay universally readable to every authenticated
+# user for Browse). Instead each one embeds `is_platform_admin()` directly as a
+# query filter -- evaluated per-request, independent of RLS/security_invoker/ownership.
 # The six dedup engine views and publication_gate_health_public came out with
 # migration 475; dedup_vision_bakeoff_results_public stays (frozen verdict cache).
+# Migration 643 (Health W9) dropped the old Health layer's seven views here and
+# every admin-gated function this file listed (four set-returning, five scalar).
 _ADMIN_GATED_VIEWS: list[str] = [
-    "data_quality_by_source",
-    "dedup_vision_bakeoff_results_public", "detail_latency_recent",
+    "dedup_vision_bakeoff_results_public",
     "image_border_cases_public", "image_tag_annotations_public",
-    "image_training_examples_public", "listing_detail_queue_public",
-    "listing_fetch_failures_public", "llm_cost_daily_public", "llm_cost_hourly_public",
-    "parsed_url_activity", "phash_pair_notes_public", "pipeline_check_history_public",
+    "image_training_examples_public",
+    "llm_cost_daily_public", "llm_cost_hourly_public",
+    "phash_pair_notes_public",
     "pipeline_checks_public",
-    "scrape_runs_public",
-]
-_ADMIN_GATED_FUNCTIONS: list[str] = [
-    "images_failure_overview", "recent_workflow_failures", "workflow_failure_summary",
-    "recent_scrape_runs",
-]
-
-# Migration 332: the five health/ops RPCs the Health dashboard calls. Unlike the
-# set-returning functions above these return a scalar jsonb, so the gate shows up as
-# NULL rather than zero rows — `count(*) FROM fn()` is 1 either way and would not
-# catch a regression. Migration 318 missed them because its triage worked from the
-# `security_definer_view` advisor list and these were plain SECURITY INVOKER SQL
-# functions; SPA route-gating (<AdminPage>) is a client affordance, not a boundary.
-_ADMIN_GATED_SCALAR_RPCS: list[str] = [
-    "health_summary()",
-    "portal_health_summary()",
-    "scraper_health_checks('sreality')",
-    "category_trends('sreality')",
-    "image_storage_overview()",
 ]
 
 
@@ -1118,16 +1093,8 @@ def test_admin_ops_views_embed_is_platform_admin(svc: Any) -> None:
             cur.execute("SELECT pg_get_viewdef(%s::regclass, true)", (f"public.{name}",))
             if not gate_is_sound(cur.fetchone()[0], "view"):
                 missing.append(name)
-        for name in _ADMIN_GATED_FUNCTIONS:
-            cur.execute(
-                "SELECT pg_get_functiondef(oid) FROM pg_proc "
-                "WHERE proname = %s AND pronamespace = 'public'::regnamespace",
-                (name,),
-            )
-            if not gate_is_sound(cur.fetchone()[0], "function"):
-                missing.append(name)
     assert not missing, (
-        f"admin-ops view/function(s) have no is_platform_admin() call in a WHERE "
+        f"admin-ops view(s) have no is_platform_admin() call in a WHERE "
         f"position -- any authenticated caller (not just the admin) may be able to "
         f"read them again: {missing}"
     )
@@ -1175,19 +1142,20 @@ def test_no_ungated_relation_reads_admin_only_data(svc: Any) -> None:
 
 
 # Views whose gate the seed fixture below can prove BEHAVIOURALLY (a service-role
-# read returns >= 1 row, so a non-admin's 0 is the gate rather than an empty table).
-# Established by seeding production inside a rolled-back transaction and diffing each
-# view's count. Deliberately absent: detail_latency_recent (an aggregate whose row
-# count does not move for one extra base row), plus the two matview-backed views and
-# the set-returning functions, which need a refresh chain the replay never runs --
-# those keep a structural-only deny assertion.
+# read returns >= 1 row, so a non-admin's 0 is the gate rather than an empty table,
+# and an admin's 0 is a gate that stayed shut). Established by seeding production
+# inside a rolled-back transaction and diffing each view's count. Since migration 643
+# dropped the ones the seed could not reach (detail_latency_recent, an aggregate whose
+# row count does not move for one extra base row; the matview-backed views and the
+# functions, which need a refresh chain the replay never runs), every gated view
+# above is seeded; a new one that cannot be keeps a structural-only deny assertion.
 _SEEDED_ADMIN_VIEWS: frozenset[str] = frozenset({
     "dedup_vision_bakeoff_results_public",
     "image_border_cases_public", "image_tag_annotations_public",
-    "image_training_examples_public", "listing_detail_queue_public",
-    "listing_fetch_failures_public", "llm_cost_daily_public", "llm_cost_hourly_public",
-    "parsed_url_activity", "phash_pair_notes_public", "pipeline_check_history_public",
-    "pipeline_checks_public", "scrape_runs_public",
+    "image_training_examples_public",
+    "llm_cost_daily_public", "llm_cost_hourly_public",
+    "phash_pair_notes_public",
+    "pipeline_checks_public",
 })
 
 
@@ -1230,16 +1198,9 @@ def seeded_admin_rows(svc: Any) -> "Iterator[str]":
         ib = cur.fetchone()[0]
         ilo, ihi = min(ia, ib), max(ia, ib)  # CHECK image_id_a < image_id_b
 
-        cur.execute("INSERT INTO listing_detail_queue (source, native_id) VALUES ('sreality', %s)", (n,))
-        cur.execute("INSERT INTO listing_fetch_failures (sreality_id) VALUES (%s)", (rid2,))
         cur.execute(
             "INSERT INTO llm_calls (called_for, provider, model, input_tokens, "
             "output_tokens, cost_usd) VALUES ('parse_url', 'anthropic', %s, 1, 1, 0.000001)",
-            (n,),
-        )
-        cur.execute(
-            "INSERT INTO parsed_url_cache (url_hash, source_url, source_kind, parse_result) "
-            "VALUES (%s, 'https://iso.test/x', 'sreality', '{}'::jsonb)",
             (n,),
         )
         cur.execute(
@@ -1264,8 +1225,6 @@ def seeded_admin_rows(svc: Any) -> "Iterator[str]":
             "VALUES (%s, 'iso', 'review', 'compare', 'iso-model', %s, %s, 'different', 'different', false)",
             (n, rid, rid2),
         )
-        cur.execute("INSERT INTO scrape_runs (run_type, source) VALUES ('index', 'sreality') RETURNING id")
-        scrape_id = cur.fetchone()[0]
     try:
         yield n
     finally:
@@ -1278,11 +1237,7 @@ def seeded_admin_rows(svc: Any) -> "Iterator[str]":
             cur.execute("DELETE FROM dedup_vision_bakeoff_results WHERE run_label = %s", (n,))
             cur.execute("DELETE FROM pipeline_check_results WHERE check_key = %s", (n,))
             cur.execute("DELETE FROM health_checks WHERE key = %s", (n,))
-            cur.execute("DELETE FROM parsed_url_cache WHERE url_hash = %s", (n,))
             cur.execute("DELETE FROM llm_calls WHERE model = %s", (n,))
-            cur.execute("DELETE FROM listing_fetch_failures WHERE sreality_id = %s", (rid2,))
-            cur.execute("DELETE FROM listing_detail_queue WHERE native_id = %s", (n,))
-            cur.execute("DELETE FROM scrape_runs WHERE id = %s", (scrape_id,))
             cur.execute("DELETE FROM images WHERE id IN (%s, %s)", (ia, ib))
             cur.execute("DELETE FROM listings WHERE id = %s", (lid,))
             cur.execute("DELETE FROM properties WHERE id IN (%s, %s)", (pa, pb))
@@ -1292,16 +1247,12 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
     svc: Any, tenants: dict[str, uuid.UUID], seeded_admin_rows: str,
 ) -> None:
     """Live proof the gate actually binds: tenant A (an ordinary account, not admin)
-   sees zero rows through every admin-gated view/function; promoting that same user
-   to `admins` makes them see through it (may still be zero rows if the table itself
-   is empty in this schema-replay DB -- the point is no permission/relation error,
-   not a specific count). One object (images_failure_overview()) wraps a materialized
-   view that a fresh schema-replay never refreshes (production refreshes it on a
-   cron) -- querying an unrefreshed matview errors regardless of caller, so refresh
-   it here to match production instead of asserting on that unrelated failure
-   mode."""
+   sees zero rows through every admin-gated view; promoting that same user to
+   `admins` makes them see through it, at least the row the fixture seeded behind
+   each seeded view. Both directions are judged against a row the service read
+   proves is there: a non-admin's zero is the gate, not an empty replay, and an
+   admin's zero is a gate that stayed shut."""
     with svc.cursor() as cur:
-        cur.execute("REFRESH MATERIALIZED VIEW images_failure_overview_mv")
         # Positive control: without a seeded row behind each view, the non-admin
         # `count(*) == 0` below passes on an empty schema replay whether or not the
         # gate works. Prove the row is reachable before asserting it is hidden.
@@ -1321,16 +1272,6 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
                 assert cur.fetchone()[0] == 0, (
                     f"non-admin authenticated saw rows through {name}"
                 )
-            for name in _ADMIN_GATED_FUNCTIONS:
-                cur.execute(f"SELECT count(*) FROM {name}()")
-                assert cur.fetchone()[0] == 0, (
-                    f"non-admin authenticated saw rows through {name}()"
-                )
-            for call in _ADMIN_GATED_SCALAR_RPCS:
-                cur.execute(f"SELECT {call}")  # noqa: S608 - fixed list
-                assert cur.fetchone()[0] is None, (
-                    f"non-admin authenticated got data back from {call}"
-                )
     with svc.cursor() as cur:
         cur.execute(
             "INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT DO NOTHING",
@@ -1340,23 +1281,13 @@ def test_admin_ops_views_deny_non_admin_allow_admin(
         with scoped(tenants["a_user"]) as conn:
             with conn.cursor() as cur:
                 for name in _ADMIN_GATED_VIEWS:
-                    cur.execute(f"SELECT count(*) FROM {name}")  # must not raise
-                for name in _ADMIN_GATED_FUNCTIONS:
-                    cur.execute(f"SELECT count(*) FROM {name}()")  # must not raise
-                for call in _ADMIN_GATED_SCALAR_RPCS:
-                    # Must not raise. Not asserted non-NULL for every call: three of
-                    # the five read a matview the replay never refreshes. The two that
-                    # are unconditional (below) ARE asserted, so the admin direction
-                    # is a real positive control rather than a smoke test.
-                    cur.execute(f"SELECT {call}")  # noqa: S608 - fixed list
-                for call in ("image_storage_overview()", "category_trends('sreality')"):
-                    # These build their payload from a bare aggregate / coalesce
-                    # default, so they are non-NULL even on empty data — meaning a
-                    # dropped gate would leak a real value here, and NULL means the
-                    # gate wrongly stayed shut for an admin.
-                    cur.execute(f"SELECT {call}")  # noqa: S608 - fixed list
-                    assert cur.fetchone()[0] is not None, (
-                        f"admin got NULL from {call} — the gate did not open"
+                    cur.execute(f"SELECT count(*) FROM {name}")  # noqa: S608 - fixed list
+                    # The admin direction's positive control: the service read above
+                    # proved a seeded row is behind each seeded view, so an admin who
+                    # sees none of them is a gate that stayed shut.
+                    seen = cur.fetchone()[0]
+                    assert name not in _SEEDED_ADMIN_VIEWS or seen > 0, (
+                        f"admin saw no rows through {name} — the gate did not open"
                     )
     finally:
         with svc.cursor() as cur:
@@ -1558,27 +1489,6 @@ def test_no_anon_write_grants(svc: Any) -> None:
     )
 
 
-# A materialized view can carry neither RLS nor an embedded gate, so `authenticated`
-# holding SELECT on one reads exactly what its gated wrapper hides. The first three
-# back migration 318's gated views/function (closed by 331); the rest back the five
-# health/ops RPCs (closed by 332, which had to convert those RPCs to SECURITY
-# DEFINER first — while they were INVOKER they read these as the CALLER, so revoking
-# would have broken the operator's own Health dashboard).
-#
-# Deliberately absent: price_stat_choropleth — the SPA reads it directly as shared-market
-# data (properties_map_mv is gone: migration 631; rent_map_choropleth: migration 601).
-_ADMIN_GATED_MATVIEWS: list[str] = [
-    "images_failure_overview_mv",
-    "health_summary_mv",
-    "health_mv_refresh_stamp",
-    "portal_health_mv",
-    "scraper_health_checks_mv",
-    "snapshot_churn_24h_mv",
-    "category_trends_mv",
-    "image_storage_overview_mv",
-]
-
-
 def test_anon_holds_no_relation_grants(svc: Any) -> None:
     """Migration 331: the settled Phase 0 posture is that anon reads NOTHING, so
     the allowlist is empty and this asserts equality, never a subset. Migration 299
@@ -1631,29 +1541,6 @@ def test_anon_executes_no_definer_function(svc: Any) -> None:
         f"so this is a write or read path open to anyone holding the anon key. "
         f"The revoke must name `public` as well as anon and authenticated: "
         f"{callable_by_anon}"
-    )
-
-
-def test_admin_gated_matviews_dark_to_authenticated(svc: Any) -> None:
-    """A matview cannot embed migration 318's is_platform_admin() filter, so raw
-    SELECT on it bypasses the gate its wrapper view enforces. Legitimate readers go
-    through the owner-rights view or the SECURITY DEFINER function, which keep
-    access via the owner — no non-admin surface needs these directly."""
-    with svc.cursor() as cur:
-        leaks: list[str] = []
-        for mv in _ADMIN_GATED_MATVIEWS:
-            cur.execute("SELECT to_regclass(%s)", (f"public.{mv}",))
-            if cur.fetchone()[0] is None:
-                continue
-            cur.execute(
-                "SELECT has_table_privilege('authenticated', %s, 'SELECT')",
-                (f"public.{mv}",),
-            )
-            if cur.fetchone()[0]:
-                leaks.append(mv)
-    assert leaks == [], (
-        f"authenticated can SELECT the raw matview(s) behind migration 318's admin "
-        f"gate, bypassing it entirely: {leaks}"
     )
 
 
