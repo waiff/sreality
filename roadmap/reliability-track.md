@@ -729,8 +729,8 @@ only, the page in both explicit themes at 1,280 px and on the phone, and a syste
 link landing on its check.
 
 ~~**Next:** wave 9 — drop the old health layer: its 8 matviews, 11 functions and 12 views stop costing
-database time, after a backup and 48 h with no reads of them (destructive, Q5).~~ Done 2026-10-22
-(Health dashboard sprint wave 9, below).
+database time, after a backup and 48 h with no reads of them (destructive, Q5).~~ Done as Health green
+sprint wave 6 (below).
 
 
 ## 2026-10-20 — Health dashboard sprint, wave 10a (shipped with this PR)
@@ -969,51 +969,48 @@ no workflow passed; the shared `operational_limits` row is the one override chan
   `parsing idnes/churn` may read red once more. The crossing after it must read ~0 foreign
   re-snapshots, and the churn incident closes on that measured OK.
 
-## 2026-10-22 — Health dashboard sprint, wave 9 (shipped with this PR)
+## 2026-10-23 — Health green sprint, wave 6: the old health layer goes (shipped with this PR)
 
-The old health layer goes: the second engine behind the old Health page, which nothing has read since
-wave 8 rebuilt the page on one view. Plan:
-[`docs/design/health-dashboard.md`](../docs/design/health-dashboard.md) § 6, wave 9, and its "As
-built" note.
+Health dashboard sprint wave 9 (#1910), parked since 10-20, rebased onto main as the green sprint's wave 6: the
+second engine behind the old Health page, which nothing has read since wave 8 rebuilt the page on one view. Plan:
+[`docs/design/health-dashboard.md`](../docs/design/health-dashboard.md) § 6, wave 9, its "As built" note, and § 14's
+"Wave 6 as built".
 
-What Health dashboard sprint wave 9 changed:
-- **Dropped from the database** (migration 643, destructive, in one transaction): 8 matviews, 12
-  views, 11 functions, 4 tables (`ops_incident_runs` 611 rows, the retired check results 1,822,
-  `portal_coverage_gate` 153, `dual_write_watermark` 22), the 5 columns of `ops_incidents` only the
-  retired signature engine used, `portals.scrape_cadence_minutes`, the `*/10` pg_cron job
-  `refresh-health-dashboard`, 8 of the 18 rows of the derived-artifacts registry and 3 settings rows.
-  The refresh alone cost 2.2 h of database time in the 48 h before the build (14.8 h over its last
-  7 days).
+What it changes:
+- **Dropped from the database** (migration 643, destructive, one transaction): 8 matviews, 12 views, 11 functions,
+  4 tables (`ops_incident_runs` 611 rows, the retired check results 1,822, `portal_coverage_gate` 153,
+  `dual_write_watermark` 22), the 5 columns of `ops_incidents` only the retired signature engine used, the `*/10`
+  pg_cron job `refresh-health-dashboard`, 8 of the 18 rows of the derived-artifacts registry and 3 settings rows.
+  The refresh cost 14.8 h of database time over its last measured 7 days (to 10-20).
+- **`portals.scrape_cadence_minutes` goes in its own migration, 663**, applied right after 643: the web portal's
+  migration 649 (applied before 643, replayed after it) inserts a row naming that column, and #1939's 650 must replay
+  after 643, so no one number fits both.
 - **Their writers, deleted in the same PR**: the images workflow's `refresh-stats` job with
   `scripts/refresh_image_stats.py`; the `active_db` and `walk_coverage` keys each walk wrote into
-  `scrape_runs.by_category` (the coverage verdict is still logged as `COVERAGE`, and the RECONCILE
-  log line keeps its `active=` count); the broker sweep's `broker_resolution_last_complete` stamp;
-  the per-m² census entry for a dropped matview; and the test rails that listed the old objects.
-- **Kept on purpose**: `ops_incidents_open_signature_uq`, the index every new cell incident needs
-  (two older notes handed it to this wave, wrongly); `data_quality_snapshots`, frozen history (Q5);
-  and three items older notes promised to this wave, which stay with the scraper track:
-  `portals.supports_complete_walk` (the Scrapers page still reads it), `delist_flip_refusals`
-  (still written) and the 150 unread ceskereality and mmreality slice rows.
-- **The number is 643, not the plan's 624**: a 624 would replay in CI before 625–640, which
-  production applied first.
-- **Delivered in migration 627's order**: merged in the first window after the gate (48 h with no
-  read of the old objects after the 2026-10-19 23:50Z baseline, Q5), so the code that wrote them
-  stopped first; then a backup to R2 (label `health-legacy-643`: the tables, the dropped columns,
-  the view and matview definitions, the registry and the settings); then the migration from `main`,
-  within 6 h of the deploy (your ruling, 2026-10-20).
+  `scrape_runs.by_category`, for the units and the orphans' entry (no Health check reads either; the coverage verdict
+  is still logged as `COVERAGE`, and the RECONCILE and `VERIFY orphans` lines keep their `active=` counts); the
+  broker sweep's `broker_resolution_last_complete` stamp; the per-m² census entry for a dropped matview; and the test
+  rails that listed the old objects.
+- **Kept on purpose**: `ops_incidents_open_signature_uq`, the index every new cell incident needs;
+  `data_quality_snapshots`, frozen history (Q5); and `portals.supports_complete_walk` (the Scrapers page still reads
+  it), `delist_flip_refusals` (still written) and the 150 unread ceskereality and mmreality slice rows, which stay
+  with the scraper track.
+- **Delivered in the database skill's order, not 627's**: the code still on `main` survives the drop (the image
+  refresh catches the missing matview and skips; the by_category keys are JSON; only the broker stamp would return
+  one unread row), so after the backup (label `health-legacy-643`) and a second 24 h zero-reads check, 643 and then
+  663 are applied from this branch (on or after 2026-10-23 13:00Z, Q5), and the PR merges after, before the next
+  daily broker lap (04:35 UTC).
 
-Owed and stated (also in the design's "As built" note):
-- The backup holds no function, grant or job: the 11 function bodies stay in git (six byte for
-  byte, five equal to their last migration once whitespace and comments are stripped), and there
-  is no revert script, as for 618 and 627.
-- The scraper track owns the three items above; `ops_incidents_open_recent_idx` (migration 462) was
-  not on the list and stays; the 132 resolved signature-engine incidents stay as history (the backup
-  keeps their dropped columns).
+Owed and stated (also in the design's notes):
+- The backup holds no function, grant or job: the 11 function bodies stay in git (six byte for byte, five equal to
+  their last migration once whitespace and comments are stripped; their live md5s, re-read 2026-10-23, are in 643's
+  header), and there is no revert script, as for 618 and 627.
+- `ops_incidents_open_recent_idx` (migration 462) was not on the list and stays; the 132 resolved signature-engine
+  incidents stay as history (the backup keeps their dropped columns).
 
-To check after the apply: the one-row verification in the PR (every dropped object gone,
-`ops_incidents_open_signature_uq` present, no open non-cell incident); then, on Health's Platform
-section, Jobs and Capacity list no `cron/refresh-health-dashboard` cell, Jobs no `artifact/` cell for
-the eight, and Migration drift reads 643 Not measured (a drop declares nothing it can probe).
+To check after the apply: the post-apply SELECTs in the PR (every dropped object gone, the cron job gone, the
+registry at 10, `ops_incidents_open_signature_uq` present, no open non-cell incident); then, on Health's Platform
+section, Jobs and Capacity list no `cron/refresh-health-dashboard` cell, Jobs no `artifact/` cell for the eight, and
+Migration drift reads 643 and 663 Not measured (a drop declares nothing it can probe).
 
-**Next:** wave 10b (ruled 2026-10-20), the sprint's last; owed after it: delivery's enabling
-migration, at your word (wave 7's three steps).
+**Next:** the green sprint's remaining waves (W3 producers, W4 location producers, W5 rulings).
