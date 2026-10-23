@@ -1,4 +1,5 @@
-"""Migration 643's rails (Health W9): exactly the old health layer goes, in one transaction, and the arbiter stays."""
+"""Migrations 643 and 663 (Health W9 = green W6): exactly the old health layer goes, in one transaction each, and
+the arbiter stays."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from tests.test_migration_rls_grants import _dynamic_ddl
 from toolkit.system_alerts import _OPEN_SQL
 
 SQL = (MIGRATIONS / "643_drop_legacy_health_layer.sql").read_text(encoding="utf-8")
+SQL663 = (MIGRATIONS / "663_drop_portals_scrape_cadence_minutes.sql").read_text(encoding="utf-8")
 S440 = (MIGRATIONS / "440_derived_artifacts_registry_completion.sql").read_text(encoding="utf-8")
 S441 = (MIGRATIONS / "441_stamp_derived_artifact.sql").read_text(encoding="utf-8")
 S621 = (MIGRATIONS / "621_platform_checks.sql").read_text(encoding="utf-8")
@@ -31,7 +33,8 @@ FUNCTIONS = ["refresh_health_matviews", "health_summary", "portal_health_summary
              "category_trends", "image_storage_overview", "images_failure_overview", "recent_scrape_runs",
              "workflow_failure_summary", "recent_workflow_failures", "emit_verification_stale_alert"]
 ENGINE_COLUMNS = ["workflow_paths", "origins", "sample_run_url", "sample_excerpt", "failure_count"]
-COLUMNS = [f"ops_incidents.{c}" for c in ENGINE_COLUMNS] + ["portals.scrape_cadence_minutes"]
+COLUMNS = [f"ops_incidents.{c}" for c in ENGINE_COLUMNS]
+CADENCE = "portals.scrape_cadence_minutes"
 SETTINGS = ["pipeline_check_thresholds", "broker_resolution_last_complete", "property_sweep_last_complete"]
 ARBITER = "ops_incidents_open_signature_uq"
 JOB = "refresh-health-dashboard"
@@ -95,8 +98,7 @@ def test_exactly_the_old_layer_goes_and_nothing_cascades() -> None:
         + [f"drop table if exists public.{r}" for r in TABLES]
         + [f"drop function if exists public.{f}({_arg_types(latest_definition(f).read_text(encoding='utf-8'), f)})"
            for f in FUNCTIONS]
-        + ["alter table public.ops_incidents " + ", ".join(f"drop column if exists {c}" for c in ENGINE_COLUMNS),
-           "alter table public.portals drop column if exists scrape_cadence_minutes"])
+        + ["alter table public.ops_incidents " + ", ".join(f"drop column if exists {c}" for c in ENGINE_COLUMNS)])
 
 
 @pytest.mark.parametrize("fn", FUNCTIONS)
@@ -128,7 +130,7 @@ def test_the_steps_run_in_order_inside_one_transaction() -> None:
              + [f"drop view if exists public.{v};" for v in VIEWS]
              + [f"drop function if exists public.{f}(" for f in FUNCTIONS]
              + [f"drop table if exists public.{t};" for t in TABLES]
-             + ["alter table public.ops_incidents drop column", "alter table public.portals drop column",
+             + ["alter table public.ops_incidents drop column",
                 "delete from public.app_settings", "update public.ops_incidents",
                 "comment on table public.ops_incidents is", f"comment on index public.{ARBITER} is",
                 "comment on table public.data_quality_snapshots is",
@@ -184,7 +186,7 @@ def test_pre_guards_exactly_what_goes_and_requires_the_arbiter() -> None:
     assert _names(lists["c_fns"]) == FUNCTIONS
     assert _names(lists["c_engine_cols"]) == ENGINE_COLUMNS
     flat = _code(pre)
-    for probe in ("pg_views", "pg_matviews", "p.prosrc", "pg_depend", "cron.job", "scrape_cadence_minutes",
+    for probe in ("pg_views", "pg_matviews", "p.prosrc", "pg_depend", "cron.job",
                   f"to_regclass('public.{ARBITER}') is null"):
         assert probe in flat, probe
     assert flat.index(f"to_regclass('public.{ARBITER}') is null") < flat.index("raise notice '643: no pg_cron here")
@@ -233,3 +235,33 @@ def test_the_dml_touches_only_the_registry_the_settings_and_the_incidents() -> N
     """A file ruled to KEEP everything else must not slip in a write elsewhere."""
     found = sorted(re.findall(r"\b(?:delete\s+from|update|insert\s+into)\s+public\.\w+", _code(SQL), flags=re.I))
     assert found == sorted(["delete from public.derived_artifacts"] * 2 + ["delete from public.app_settings", "update public.ops_incidents"]), found
+
+
+def test_the_cadence_column_goes_after_649_and_643_before_650() -> None:
+    """RED by: the column drop back in 643, which replays before 649's web row names it (the replay stops there), or
+    663 renumbered before 649. 650 (#1939) needs 643 first: parsed_url_activity reads the table it drops."""
+    assert ("column", CADENCE) not in _dropped(SQL)
+    web = (MIGRATIONS / "649_web_portal.sql").read_text(encoding="utf-8")
+    assert "scrape_cadence_minutes" in _code(web), "649 no longer names the column: 663 could fold back into 643"
+    names = sorted(p.name for p in MIGRATIONS.glob("*.sql"))
+    assert (names.index("643_drop_legacy_health_layer.sql") < names.index("649_web_portal.sql")
+            < names.index("663_drop_portals_scrape_cadence_minutes.sql"))
+
+
+def test_663_drops_the_one_column_in_one_transaction_and_guards_it() -> None:
+    """RED by: a second object, a CASCADE, a DROP outside the transaction, or a guard that stops looking."""
+    assert _dropped(SQL663) == {("column", CADENCE)}
+    assert parse_objects(SQL663) == []
+    code = _code(SQL663)
+    for absent in ("cascade", "execute", "delete from", "update public.", "insert into"):
+        assert absent not in code, absent
+    steps = ["set lock_timeout = '5s';", "begin;", "do $pre$",
+             "alter table public.portals drop column if exists scrape_cadence_minutes;", "do $post$",
+             "notify pgrst, 'reload schema';", "commit;", "reset statement_timeout;", "reset lock_timeout;"]
+    assert all(code.count(step) == 1 for step in steps)
+    at = [code.index(step) for step in steps]
+    assert at == sorted(at)
+    pre = _code(_block(SQL663, "pre"))
+    for probe in ("pg_views", "pg_matviews", "p.prosrc", "pg_depend", "pg_attrdef"):
+        assert probe in pre, probe
+    assert "supports_complete_walk" in _block(SQL663, "post"), "the column the scraper track keeps"

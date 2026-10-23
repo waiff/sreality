@@ -1,20 +1,26 @@
 -- 643_drop_legacy_health_layer.sql -- the old health layer goes: its 10-minute refresh, 8 matviews, 12 views,
--- 11 functions, 4 tables, 6 columns, 8 registry rows and 3 settings rows (Health dashboard sprint, wave 9;
--- docs/design/health-dashboard.md, "Wave 9: Drop the old health layer"). The plan and the headers of migrations 620
--- and 621 call this file 624; it is 643 as applied, because 624 would replay before 625-640, which production
--- applied first.
+-- 11 functions, 4 tables, 5 columns, 8 registry rows and 3 settings rows (Health dashboard sprint, wave 9 = Health
+-- green sprint, wave 6; docs/design/health-dashboard.md, "Wave 9: Drop the old health layer" and section 14). The
+-- plan and the headers of migrations 620 and 621 call this file 624; it is 643 as applied, because 624 would replay
+-- before 625-640, which production applied first. Its sixth column, portals.scrape_cadence_minutes, goes in 663: 649
+-- (applied before this file, replayed after it) inserts the web portal's row naming that column, and 650 (#1939)
+-- must replay after this file (it drops parsed_url_cache, which parsed_url_activity reads), so no one number fits.
 --
 -- ===========================================================================
--- DESTRUCTIVE, with the operator's OK (ruling Q5; the autonomous apply ruled 2026-10-20). Applied only after
---   (1) the PR that carries this file has merged and deployed, so its writers have stopped: images.yml's
---       refresh-stats job (scripts/refresh_image_stats.py, deleted), the by_category keys walk_coverage and
---       active_db (scraper/portal_runner.py) and the broker_resolution_last_complete stamp
---       (scripts/resolve_brokers.py);
---   (2) 48 h in which no browser role read a dropped view or called a dropped function (pg_stat_statements by
---       userid, against the baseline of 2026-10-19 23:50Z, so not before 2026-10-21 23:50Z);
---   (3) the R2 backup has been read back (backup_before_drop.yml, label health-legacy-643: the four tables and
+-- DESTRUCTIVE, with the operator's OK (ruling Q5; the apply on or after 2026-10-23 13:00Z, section 14). Applied only
+-- after
+--   (1) 48 h in which no browser role read a dropped view or called a dropped function (pg_stat_statements by
+--       userid, against the baseline of 2026-10-19 23:50Z, so not before 2026-10-21 23:50Z), and a second 24 h
+--       zero-reads check (section 14, wave 6);
+--   (2) the R2 backup has been read back (backup_before_drop.yml, label health-legacy-643: the four tables and
 --       data_quality_snapshots whole; the definitions of the 8 matviews and 12 views; ops_incidents' five engine
 --       columns and portals.scrape_cadence_minutes as key + column CSVs; derived_artifacts and app_settings whole).
+-- The code that still writes the old layer survives this file, so it is applied from the PR's branch before the merge
+-- (the database skill's order): images.yml's refresh-stats job (scripts/refresh_image_stats.py) catches the
+-- undefined_table public.refresh_matview raises for a dropped matview and skips; the by_category keys walk_coverage
+-- and active_db are JSON in scrape_runs; resolve_brokers' daily lap would re-create broker_resolution_last_complete,
+-- so the PR merges before its next run (04:35 UTC, GitHub cron) or that one unread row returns. The PR deletes all
+-- three writers.
 -- Forward only (rule 1): a restore is that backup plus the function statements of migrations 274, 318, 332, 340
 -- and 441, which equal the live bodies but for whitespace and comments. No revert file (618 and 627 ship none).
 -- The live functions, 2026-10-20: md5(prosrc), latest file, EXECUTE grantees beside the owner.
@@ -53,7 +59,7 @@
 --   5. Tables pipeline_check_results_retired_2026_09_22 (551; 1,822 rows), portal_coverage_gate (455; 153),
 --      dual_write_watermark (326; 22) and ops_incident_runs (463; 611, unwritten since 2026-10-18).
 --   6. Columns ops_incidents.workflow_paths, origins, sample_run_url, sample_excerpt and failure_count (the signature
---      engine's, 462) and portals.scrape_cadence_minutes (114). No index or constraint covers any of them.
+--      engine's, 462). No index or constraint covers any of them. (portals.scrape_cadence_minutes, 114: in 663.)
 --   7. Rows: the eight matviews' derived_artifacts rows (18 -> 10 live); the app_settings rows
 --      pipeline_check_thresholds, broker_resolution_last_complete and property_sweep_last_complete.
 --   8. 621's statement 3 again: an open incident outside the cell namespace closes as 'retired: signature engine'
@@ -90,19 +96,18 @@
 --      ops_incidents). 8. The columns. 9. The three settings rows. 10. 621's statement 3. 11. The comments.
 --   12. $post$: everything above is gone; the arbiter, data_quality_snapshots, ops_incidents' posture and Health's
 --       one read stand. Then notify pgrst (delivered at commit).
--- The hot locks (ops_incidents: the worker's health lane every 60 s, health-liveness every 5 min and the API;
--- portals: the scrapers, the worker and the API) come last, so they are held only from 7 to the commit.
+-- The hot lock (ops_incidents: the worker's health lane every 60 s, health-liveness every 5 min and the API) comes
+-- last, so it is held only from 7 to the commit.
 -- No CASCADE: the guard proves nothing else depends, and a plain DROP refuses otherwise. No ci-allow-dynamic marker:
 -- no EXECUTE builds anything.
 --
--- APPLY from main once the PR has merged and deployed, the gate holds and the backup is read back (627's order):
--- apply_migration.yml --ref main -f file=643_drop_legacy_health_layer.sql, a dry run, then dry_run=false
--- confirm=APPLY. Within 24 h of the last image refresh before the merge (as little as ~15 h after the deploy): the two image rows
--- turn Problem 24 h after their last refresh (a 6 h budget + 18 h GitHub delivery slack). After any resolve_brokers_full run that started before the merge has ended:
--- it would re-create broker_resolution_last_complete. With psql running in minute :x2-:x4 or :x7-:x9: the */10
--- refresh holds health_summary_mv from :x0 for its whole run (p50 46 s, p95 151 s, max 375 s in the week to
--- 2026-10-20) and health-liveness (*/5) reads ops_incidents; a wait past 5 s rolls the file back and the workflow's
--- lock-timeout retry re-runs it.
+-- APPLY from the PR's branch once the gate holds and the backup is read back, then 663 at once:
+-- apply_migration.yml --ref <branch> -f file=643_drop_legacy_health_layer.sql, a dry run, then dry_run=false
+-- confirm=APPLY. Not while a resolve_brokers_full run is in flight (it would re-create broker_resolution_last_complete
+-- after $post$). With psql running in minute :x3-:x4 or :x8-:x9: the */10 refresh holds health_summary_mv from :x0
+-- for its whole run (p50 46 s, p95 151 s, max 375 s in the week to 2026-10-20), health-liveness (*/5) reads
+-- ops_incidents, and rebuild_browse_list (*/15) holds its locks from :00, :15, :30 and :45 for ~70 s; a wait past
+-- 5 s rolls the file back and the workflow's lock-timeout retry re-runs it.
 -- HEALTH: the jobs and capacity cells of cron/refresh-health-dashboard and the eight artifact/<matview> cells leave on
 -- their own (scripts/checks/platform.py builds them from live cron.job and derived_artifacts). migration_drift reads
 -- this file Unverifiable (it creates nothing): its receipt is $post$, and the one-row verification SELECT in the PR.
@@ -150,7 +155,6 @@ declare
   v_rels oid[];
   v_fns oid[];
   v_cols int[];
-  v_cadence int[];
   v_bad text;
 begin
   select coalesce(array_agg(c.oid), '{}') into v_rels
@@ -161,9 +165,6 @@ begin
   select coalesce(array_agg(a.attnum::int), '{}') into v_cols
     from pg_attribute a
    where a.attrelid = 'public.ops_incidents'::regclass and a.attname = any (c_engine_cols) and not a.attisdropped;
-  select coalesce(array_agg(a.attnum::int), '{}') into v_cadence
-    from pg_attribute a
-   where a.attrelid = 'public.portals'::regclass and a.attname = 'scrape_cadence_minutes' and not a.attisdropped;
 
   if to_regclass('public.ops_incidents_open_signature_uq') is null then
     raise exception '643 refused: ops_incidents_open_signature_uq, the cell ladder''s ON CONFLICT arbiter, is missing; this file keeps it and runs only beside it';
@@ -196,7 +197,6 @@ begin
      where p.pronamespace not in ('pg_catalog'::regnamespace, 'information_schema'::regnamespace)
        and p.oid <> all (v_fns)
        and (p.prosrc ~ v_names
-            or p.prosrc ~ '\mscrape_cadence_minutes\M'
             or (p.prosrc ~ '\mops_incidents\M' and p.prosrc ~ v_engine))
     union all
     -- an object outside the list on a dropped relation, its row type, a dropped function or a dropped column. What
@@ -210,9 +210,7 @@ begin
              and d.refobjid in (select c.reltype from pg_class c where c.oid = any (v_rels)))
          or (d.refclassid = 'pg_proc'::regclass and d.refobjid = any (v_fns))
          or (d.refclassid = 'pg_class'::regclass and d.refobjid = 'public.ops_incidents'::regclass
-             and d.refobjsubid = any (v_cols))
-         or (d.refclassid = 'pg_class'::regclass and d.refobjid = 'public.portals'::regclass
-             and d.refobjsubid = any (v_cadence)))
+             and d.refobjsubid = any (v_cols)))
        and not exists (select 1 from pg_depend o
                         where o.classid = d.classid and o.objid = d.objid and o.deptype in ('a', 'i')
                           and o.refclassid = 'pg_class'::regclass and o.refobjid = any (v_rels))
@@ -225,8 +223,7 @@ begin
      where d.deptype = 'a'
        and d.classid <> 'pg_attrdef'::regclass
        and d.refclassid = 'pg_class'::regclass
-       and ((d.refobjid = 'public.ops_incidents'::regclass and d.refobjsubid = any (v_cols))
-         or (d.refobjid = 'public.portals'::regclass and d.refobjsubid = any (v_cadence)))
+       and d.refobjid = 'public.ops_incidents'::regclass and d.refobjsubid = any (v_cols)
   ) deps;
   if v_bad is not null then
     raise exception '643 refused: % still name(s) or depend(s) on what this file drops', v_bad;
@@ -344,7 +341,6 @@ alter table public.ops_incidents
   drop column if exists sample_run_url,
   drop column if exists sample_excerpt,
   drop column if exists failure_count;
-alter table public.portals drop column if exists scrape_cadence_minutes;
 
 -- ---------------------------------------------------------------------------
 -- 9. The settings rows: the old checks' thresholds (read only by emit_verification_stale_alert, dropped above) and
@@ -369,9 +365,10 @@ comment on table public.ops_incidents is
   'Cell incidents (migrations 619, 621 and 643): one row per failing health cell, signature '
   'cell:<check_key>:<subject>, at most one open per signature (ops_incidents_open_signature_uq). '
   'toolkit/system_alerts.reconcile opens it, keeps it (last_seen_at), holds its recovery (ok_since) and resolves '
-  'it (resolved_at, resolve_reason), and tells each onset, reminder and recovery as a system_health '
-  'notification_dispatches row (alert_count, alerted_at); the operator acknowledges it on Health '
-  '(acknowledged_at, POST /admin/health/acknowledge). Rows outside the cell namespace are the retired signature '
+  'it (resolved_at, resolve_reason), and tells each onset and reminder by stamping it (alert_count, alerted_at); '
+  'Health shows it, the operator acknowledges it there (acknowledged_at, POST /admin/health/acknowledge) and the '
+  'GitHub canary e-mails an alarm left unacknowledged; no system alert reaches the bell (migration 651). Rows '
+  'outside the cell namespace are the retired signature '
   'engine''s history (migration 462), all resolved. RLS on and closed to browser roles; the browser reads '
   'incidents through pipeline_checks_public.';
 
@@ -448,9 +445,8 @@ begin
   select string_agg(format('%s.%s', a.attrelid::regclass, a.attname), ', ' order by a.attname) into v_left
     from pg_attribute a
    where not a.attisdropped
-     and ((a.attrelid = 'public.ops_incidents'::regclass
-           and a.attname in ('workflow_paths', 'origins', 'sample_run_url', 'sample_excerpt', 'failure_count'))
-       or (a.attrelid = 'public.portals'::regclass and a.attname = 'scrape_cadence_minutes'));
+     and a.attrelid = 'public.ops_incidents'::regclass
+     and a.attname in ('workflow_paths', 'origins', 'sample_run_url', 'sample_excerpt', 'failure_count');
   if v_left is not null then
     raise exception '643 did not land: column(s) % still exist', v_left;
   end if;
