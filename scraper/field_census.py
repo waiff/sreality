@@ -91,7 +91,8 @@ ATTRIBUTE_FIELDS: tuple[str, ...] = tuple(
 )
 
 # The nine listing portals, from the per-portal config row (CLAUDE.md rule 21) rather than
-# a tenth list that can drift. `kind = 'scraper'` excludes the on-demand URL parsers.
+# a tenth list that can drift. `kind = 'scraper'` stays the posture filter: portals.kind still
+# admits 'parser', though migration 650 deleted the last such row.
 PORTAL_SOURCES_SQL = """
 select source from portals where kind = 'scraper' and is_enabled order by source
 """

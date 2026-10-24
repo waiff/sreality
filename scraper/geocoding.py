@@ -103,9 +103,10 @@ class GeocodingError(RuntimeError):
 # Kill switch (location-data program, W0 Mapy remediation step R1). Mapy.com's
 # terms (effective 2025-06-01) prohibit storing or caching API function
 # results, and every historical geocode path persisted them (geocode_cache,
-# listings.geom, parsed_url_cache) — so the client is unreachable unless the
-# operator explicitly opts in. Default OFF: geocode() raises GeocodingError
-# before any HTTP; build_geocoder() returns None so drains skip quietly.
+# listings.geom, parsed_url_cache — the last dropped by migration 650) — so
+# the client is unreachable unless the operator explicitly opts in. Default
+# OFF: geocode() raises GeocodingError before any HTTP; build_geocoder()
+# returns None so drains skip quietly.
 # Display-only Mapy use (tiles, the /maps suggest proxy) is unaffected — the
 # prohibition is on persistence, not display.
 ENABLE_ENV = "MAPY_GEOCODE_ENABLED"

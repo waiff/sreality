@@ -97,7 +97,7 @@ _ADMIN_ONLY_RELATIONS: list[str] = [
     # The carry record (migration 589), backend-only like the merge ledger beside it.
     "property_merge_carries",
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
-    "llm_calls", "parsed_url_cache", "pipeline_check_results",
+    "llm_calls", "pipeline_check_results",
     # tag_taxonomy + image_tag_labels (migration 442) replace image_training_examples:
     # the tag ground truth now, and — like dedup_sim.taxonomy_labels / label_proposals
     # before them, unlike migration 309 — backend-only, with NO `_public` view, so they
@@ -1238,11 +1238,6 @@ def seeded_admin_rows(svc: Any) -> "Iterator[str]":
             (n,),
         )
         cur.execute(
-            "INSERT INTO parsed_url_cache (url_hash, source_url, source_kind, parse_result) "
-            "VALUES (%s, 'https://iso.test/x', 'sreality', '{}'::jsonb)",
-            (n,),
-        )
-        cur.execute(
             "INSERT INTO health_checks (key, domain, class, host, cadence_s, staleness_budget, label, declared_at) "
             "VALUES (%s, 'platform', 'alarm', 'github-actions', 3600, '1 day', 'iso', now() - interval '1 day')",
             (n,),
@@ -1278,7 +1273,6 @@ def seeded_admin_rows(svc: Any) -> "Iterator[str]":
             cur.execute("DELETE FROM dedup_vision_bakeoff_results WHERE run_label = %s", (n,))
             cur.execute("DELETE FROM pipeline_check_results WHERE check_key = %s", (n,))
             cur.execute("DELETE FROM health_checks WHERE key = %s", (n,))
-            cur.execute("DELETE FROM parsed_url_cache WHERE url_hash = %s", (n,))
             cur.execute("DELETE FROM llm_calls WHERE model = %s", (n,))
             cur.execute("DELETE FROM listing_fetch_failures WHERE sreality_id = %s", (rid2,))
             cur.execute("DELETE FROM listing_detail_queue WHERE native_id = %s", (n,))

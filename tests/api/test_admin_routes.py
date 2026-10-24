@@ -64,9 +64,9 @@ def _seed_skill() -> _InMemorySkill:
 def store():
     skills: dict[str, _InMemorySkill] = {"rental_estimator_v1": _seed_skill()}
     app_settings: dict[str, dict[str, Any]] = {
-        "llm_parse_model": {
-            "value": "claude-sonnet-4-5",
-            "description": "URL parser model",
+        "enrichment_model": {
+            "value": "gpt-5.6-luna",
+            "description": "Text-lane model",
             "updated_at": "2026-05-11T00:00:00+00:00",
         },
     }
@@ -245,14 +245,14 @@ def test_get_app_settings_lists_keys(client):
     res = client.get("/admin/app_settings")
     assert res.status_code == 200
     data = res.json()["data"]
-    assert any(r["key"] == "llm_parse_model" for r in data)
+    assert any(r["key"] == "enrichment_model" for r in data)
 
 
 def test_put_app_setting_persists(client):
-    res = client.put("/admin/app_settings/llm_parse_model", json={"value": "claude-sonnet-4-6"})
+    res = client.put("/admin/app_settings/enrichment_model", json={"value": "gpt-5-mini"})
     assert res.status_code == 200, res.text
-    follow = client.get("/admin/app_settings/llm_parse_model")
-    assert follow.json()["value"] == "claude-sonnet-4-6"
+    follow = client.get("/admin/app_settings/enrichment_model")
+    assert follow.json()["value"] == "gpt-5-mini"
 
 
 def test_admin_tools_lists_agent_registry(client):

@@ -3,7 +3,7 @@
 # A check judges every portal by the seams its walks record (DECLARED_TOTAL_KEY, total_is_count,
 # declared_is_upper_bound), never by its name. Docstrings are prose and are not scanned; every
 # other str constant is, f-string parts included. Word boundaries let a shared name that holds a
-# portal name as a mere prefix (the parser row 'idnes_reality') through, and catch the English
+# portal name as a mere prefix (a synthetic 'idnes_fake') through, and catch the English
 # word "maxima" (write "maximum values"). An underscore is a word character, so two names they
 # pass have arms of their own: the declared-total key's value (import DECLARED_TOTAL_KEY: an
 # f-string's literal parts never hold what it interpolates) and the sreality_id identifier (a
@@ -56,7 +56,7 @@ def check(x):
     """Reads idnes walks."""
     key = "Remax"
     sql = f"select '{x}' from walks where source = 'maxima'"
-    return "idnes_reality", key, sql
+    return "idnes_fake", key, sql
 '''
     assert [text for _, text in _hits(source)] == ["Remax", "' from walks where source = 'maxima'"]
 

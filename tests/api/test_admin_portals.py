@@ -104,7 +104,7 @@ def client(monkeypatch):
     )
 
     def fake_default_config(source: str) -> Any:
-        if source in ("remax", "idnes_reality"):
+        if source == "remax":
             raise ValueError("no portal config")
         return SimpleNamespace(limits=PortalLimits())
 

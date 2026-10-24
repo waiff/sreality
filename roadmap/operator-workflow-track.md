@@ -102,16 +102,22 @@ account's iPhones (the installed PWA). Channels: the in-app feed, iPhone push, e
 Spec `docs/design/new-property-from-link.md` (PR #1913, approved 2026-10-20, six rulings in). North star: a
 pasted link is an ordinary ad — one identity rule, one fetch path (the drain), one write, one birth; the sites
 we do not crawl are the tenth portal `web`.
-- [ ] **W1 `feature/link-ingest`** — `scraper/portal_identity.py` (the one URL→(source, native id) canon; the
+- [x] **W1 `feature/link-ingest`** (PR #1923, merged 2026-10-21) — `scraper/portal_identity.py` (the one URL→(source, native id) canon; the
       seven parsers import it; `tests/fixtures/portal_url_probes.json` pins Python and `portalIds.ts` alike),
       `POST/GET /listings/ingest` (admin; enqueue, never fetch), the maintenance lane at 30 s + births inside the
       daily sweep, `NewPropertyDialog` on Pipeline, Browse and the Odkaz tab, the extension's "Přidat do databáze".
-- [ ] **W2 `cleanup/estimation-four`** — estimation = add the ad, then estimate it (`listing_id` in, `url` out);
+- [x] **W2 `cleanup/estimation-four`** (PR #1924, merged 2026-10-21) — estimation = add the ad, then estimate it (`listing_id` in, `url` out);
       the LLM URL parser, both previews, `url_parser`, the orphan machinery and the sreality-only late-binder go.
-- [ ] **W3 `feature/web-portal`** — the tenth portal (deterministic parser, text-lane reading, `indexless`
+- [ ] **W3 `feature/web-portal`** (PR #1936, migration 649) — the tenth portal (deterministic parser, text-lane reading, `indexless`
       presence seam, daily walk, contract, broker row, chip "Web"); after #1910.
-- [ ] **W4 `cleanup/estimation-four-schema`** — drop `parsed_url_cache`, nine parse columns, two settings, the
-      `idnes_reality` portals row (destructive, backup + OK given 2026-10-20; after 643).
+- [ ] **W4 `cleanup/estimation-four-schema`** (PR #1939) — migration 650 drops `parsed_url_cache`, nine parse columns, two
+      settings, the `idnes_reality` portals row (destructive, OK given 2026-10-20). Written, not applied; applies
+      after 643 + backup (`backup_before_drop.yml`, recipe in the file header); merges after #1910.
+- [ ] **Next (subtraction, after W4):** no `portals` row has kind `'parser'` once 650 drops `idnes_reality` (it was
+      the only one), yet four places still model it — the CHECK (migration 100), the SPA `PortalKind` type and the
+      `'on_demand'` arm of `portalPosture.ts`, the `# parser-only portal` arm in `api/routes/admin.py`, and the fake
+      `'parser'` remax row in `tests/api/test_admin_portals.py`. Drop the kind (`portals.kind` itself stays, design
+      §6), or keep the admin arm and rename its test case to "a portal with no baked default".
 ### Phase U-MERGE-LETTERS: merge mode as one statement of letters (live 2026-10-21 06:10Z, PR #1926 = 3e6a904d)
 - **Done (PR #1926, no migration):** Browse's merge mode marks cards with letters — a letter key marks the focused
   card (the pointer focuses the card it is over; Tab / Shift+Tab move card to card; ← → page the photos),

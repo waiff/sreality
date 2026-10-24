@@ -128,7 +128,7 @@ def test_the_diacritic_class_is_a_plain_posix_bracket_expression() -> None:
 
 # ------------------------------------------------------------------- the floor dates
 
-def test_archive_eras_are_the_seven_html_portals_with_the_design_dates() -> None:
+def test_archive_eras_are_the_eight_html_portals_with_the_design_dates() -> None:
     assert den.ARCHIVE_FLOORS == {
         "bazos": datetime.date(2026, 5, 28),
         "idnes": datetime.date(2026, 5, 29),
@@ -136,6 +136,7 @@ def test_archive_eras_are_the_seven_html_portals_with_the_design_dates() -> None
         "remax": datetime.date(2026, 6, 1),
         "ceskereality": datetime.date(2026, 6, 26),
         "realitymix": datetime.date(2026, 6, 27),
+        "web": datetime.date(2026, 10, 22),
         # The corpus date (end of June) is the day M&M Reality went live AGAIN after
         # its cron was retired; the bodies it archived in its first era are still on
         # disk, so the floor — "no HTML before this, ever" — is the earlier one.

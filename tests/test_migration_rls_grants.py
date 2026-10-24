@@ -314,7 +314,7 @@ _ADMIN_ONLY_RELATIONS = frozenset({
     # and the split, all service-role; no `_public` view.
     "property_merge_carries",
     "listing_detail_queue", "listing_fetch_failures", "detail_queue_completions",
-    "llm_calls", "parsed_url_cache", "pipeline_check_results",
+    "llm_calls", "pipeline_check_results",
     "image_border_cases", "tag_taxonomy", "image_tag_labels",
     # image_tag_label_events (migration 446) is the append-only decision history
     # behind image_tag_labels — same backend-only posture, no `_public` view.

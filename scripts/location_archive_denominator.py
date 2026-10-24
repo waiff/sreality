@@ -126,6 +126,7 @@ ARCHIVE_ERAS: dict[str, tuple[ArchiveEra, ...]] = {
     "remax": (ArchiveEra(datetime.date(2026, 6, 1), None),),
     "ceskereality": (ArchiveEra(datetime.date(2026, 6, 26), None),),
     "realitymix": (ArchiveEra(datetime.date(2026, 6, 27), None),),
+    "web": (ArchiveEra(datetime.date(2026, 10, 22), None),),
     "mmreality": (
         ArchiveEra(datetime.date(2026, 5, 30), datetime.date(2026, 6, 11)),
         ArchiveEra(datetime.date(2026, 6, 28), None),
