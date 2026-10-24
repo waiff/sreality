@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from scraper import idnes_main, portal_runner
 from scraper import portal as portal_mod
 from scraper.idnes_main import IdnesPortal
