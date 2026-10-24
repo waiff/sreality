@@ -83,6 +83,12 @@ _DESCENT_DEPTH = 2
 _RESAMPLE_PASSES = 2
 _RESAMPLE_MIN_GAIN = 5
 
+# Pages of one place idnes may refuse (an exception after the client's full
+# retry) before the place ends `error`. One page can 500 server-side while its
+# neighbours serve (prodej/domy/jihocesky-kraj, 10-23/24); skipping it costs ~26 ads,
+# which the shortfall sends to the descent and resample. A second refusal is ours.
+_MAX_REFUSED_PAGES = 1
+
 
 @dataclass(frozen=True)
 class SliceWalk:
@@ -207,14 +213,15 @@ class IdnesPortal(portal_runner.PortalDefaults):
 
         Returns (rows, declared_total, pages, outcome, stop, first_page_html) —
         the numeric verdict and the structural one side by side (see SliceWalk).
-        The HTML is kept because it advertises the places one level down, which
-        is the descent path when this one cannot be enumerated.
+        The HTML (the first page that answered) is kept: it advertises the places
+        one level down, the descent path when this one cannot be enumerated.
         """
         rows: list[tuple[str, str, int | None]] = []
         ref: set[str] = set()
         declared: int | None = None
         first_html: str | None = None
         pages = 0
+        refused = 0
         page: int | None = None
         stop: StopReason
         while True:
@@ -226,9 +233,13 @@ class IdnesPortal(portal_runner.PortalDefaults):
                 html, _ = client.fetch_index(
                     sale_type, cat, page, locality=locality, sl=sl)
             except Exception as exc:  # noqa: BLE001 - one place must not kill the walk
-                LOG.warning("SLICE error cm=%s ct=%s place=%s page=%s: %s",
-                            cat, sale_type, label, page, exc)
-                return rows, declared, pages, "error", "error", first_html
+                refused += 1
+                LOG.warning("SLICE error cm=%s ct=%s place=%s page=%s refused=%d: %s",
+                            cat, sale_type, label, page, refused, exc)
+                if refused > _MAX_REFUSED_PAGES:
+                    return rows, declared, pages, "error", "error", first_html
+                page = (page or 0) + 1      # offset-style: bare URL, ?page=1, ?page=2 …
+                continue
             parsed = parse_index(html)
             pages += 1
             if first_html is None:

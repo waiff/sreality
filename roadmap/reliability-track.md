@@ -963,3 +963,40 @@ no workflow passed; the shared `operational_limits` row is the one override chan
   after the deploy (the new hash), mostly inside the first crossing: about one ordinary wave, so
   `parsing idnes/churn` may read red once more. The crossing after it must read ~0 foreign
   re-snapshots, and the churn incident closes on that measured OK.
+
+## 2026-10-24 — Health green sprint, wave 7b (shipped with this PR)
+
+A page idnes refuses costs one page, not the place. reality.idnes.cz answered HTTP 500 (its 26 kB
+"Chyba 500 … technická chyba" page, all four client attempts inside 8 s) for ONE page of
+`prodej/domy/jihocesky-kraj`: `?page=1` on 10-23 18:41 and 22:33 and 10-24 06:03, `?page=2` at 11:45Z,
+while the pages around it and plzensky-kraj's served — a server-side render failure of one ad, moving
+down the pager as newer ads arrive. `_walk_place` returned `error` on the first exception, so the ledger
+read `outcome=error declared=1574 collected=26 pages=1`, the dum/prodej unit (27.9k active ads) was not
+end-reached in 4 of the last 5 walks, the orphan scope nominated nothing, and Health read `scraping
+idnes/walks/dum-prodej` + `idnes/walks/orphans` Watch and `delisting idnes/stuck` 157 past 43 h (2,220
+waiting); ~1,550 South Bohemian houses had no index sighting since 10-23 11:40.
+
+- **The change** (`scraper/idnes_main.py`, one constant `_MAX_REFUSED_PAGES = 1`, nothing in shared
+  code): a page the client gives up on is logged (`SLICE error … refused=1`) and skipped, the loop going
+  on at the next offset (`(page or 0) + 1`: the bare URL is the first page, `?page=1` the second); the
+  second refusal in the same place ends it `error` exactly as before. The place's stop is the terminator
+  its loop actually ended on; its ~26 unseen ads leave it `incomplete`, so the existing descent (kraj →
+  okresy, the parent's rows kept) and resample recover them bar the broken page, and the unit's unseen
+  remainder is nominated at `QUEUE_PRIORITY_VERIFY` for its own page to decide (two gone verdicts ≥ 12 h
+  apart, the flip cap). The cost while the page stays broken: the ~61-page slice descends and resamples
+  once (an estimated ~120 more pages a walk). A blocked portal still fails each place on its second page: in the 10-23 04:51 outage
+  five slices were refused 06:29:32–06:30:56, ~10 s apart, so that walk still ends unproven.
+- **The ruling asked.** CLAUDE.md rule 3 lists `error` among OUR stops. The refined reading: an error is
+  ours when it ENDS a page loop; one refused page inside a loop that ran on to the portal's end is the
+  portal's refusal of one page — evidence in the count, never a veto, the posture rule 3 already takes
+  for a slice one row short of its declared count. Proposed rule-3 text: `… / slice subset / a
+  loop-ending error (idnes: one refused page per place is evidence) / uncorroborated empty page`.
+- **Deleted:** the overlapping-pages test, a twin of
+  `test_an_all_duplicates_page_no_longer_ends_the_walk` (same three pages, same asserts).
+
+To check: the next dum/prodej walk logs `SLICE error … place=jihocesky-kraj … refused=1` then `SLICE
+descend … place=jihocesky-kraj`, the slice's ledger row reads `incomplete` or `exhausted` (not `error`),
+and `CATEGORY cm=domy ct=prodej … complete=True`; `idnes/walks/dum-prodej` and `idnes/walks/orphans` go
+OK on that walk and `delisting idnes/stuck` drains as the nominated houses get their page checks.
+
+**Next:** on the operator's ruling, rule 3's line in CLAUDE.md (proposed above).
