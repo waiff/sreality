@@ -125,8 +125,8 @@ history: `docs/architecture.md` § Architectural rules — read it BEFORE modify
 3. **Never delete; delist via `is_active=false`.** History is sacred. **Since 2026-09-07 index absence NOMINATES,
    the page DECIDES** (`portal_runner._queue_presence_checks`); **since 2026-09-08 the gate is STRUCTURAL, not
    numeric** — a walk that REACHED THE PORTAL'S END (`scraper.portal.walk_reached_end`: every unit walked, each page
-   loop out on a portal terminator, no stop of OURS — deadline / page cap / `--limit` / slice subset / error /
-   uncorroborated empty page) queues every active row it did not see into `listing_detail_queue` at
+   loop out on a portal terminator, no stop of OURS — deadline / page cap / `--limit` / slice subset / a loop-ending
+   error (one refused page per place is evidence) / uncorroborated empty page) queues every active row it did not see into `listing_detail_queue` at
    `QUEUE_PRIORITY_VERIFY` (last, 20% reserve); the drain fetches the page: a POSITIVE gone signal (404/410,
    redirect off the listing, the portal's "no longer active" text → `ListingGoneError`) is RECORDED in
    `detail_queue_completions` and **since 2026-10-09 flips that one listing only when the ledger already holds an
