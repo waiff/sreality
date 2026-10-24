@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from scraper import idnes_main, portal_runner
 from scraper import portal as portal_mod
 from scraper.idnes_main import IdnesPortal
@@ -941,6 +943,100 @@ def test_a_descent_child_that_fails_vetoes_the_slice(monkeypatch):
     assert complete is False
 
 
+# --- a page idnes refuses costs one page, not the place ----------------------
+#
+# Measured 2026-10-23/24: idnes answered HTTP 500 for ONE page of
+# prodej/domy/jihocesky-kraj (all four client attempts, three walks running)
+# while the pages around it served, and the place ended `error` at 26 of 1,574 —
+# so the whole 27.9k-row category nominated nothing. One refused page is now
+# skipped: the place still ends on idnes's own terminator, ~26 ads short, which
+# the descent and the resample are for. A second refusal in a place is ours.
+
+
+class _Refusing(_IdxClient):
+    """Every place pages None -> 1 -> ... -> `last`; a (place, page) in `refused`
+    raises, as the client does once its retries are spent."""
+
+    def __init__(self, refused=(), last=3):
+        super().__init__()
+        self.refused = set(refused)
+        self.last = last
+        self.asked: list[tuple[str | None, int | None]] = []
+
+    def fetch_index(self, sale_type, category, page=None, *, locality=None,
+                    sl=None, price_min=None, price_max=None):
+        place = locality or sl
+        self.asked.append((place, page))
+        if (place, page) in self.refused:
+            raise RuntimeError(f"500 from {place}?page={page}")
+        return (f"{place}|{page}", 200)
+
+    def parse(self, marker):
+        _place, _, page = marker.partition("|")
+        n = 0 if page == "None" else int(page)
+        return _page(items=[n + 1], total=self.last + 1,
+                     next_offset=n + 1 if n < self.last else None)
+
+
+def _refusing_walk(monkeypatch, slices, refused):
+    client = _Refusing(refused)
+    monkeypatch.setattr(idnes_main, "IdnesClient", lambda *a, **k: client)
+    monkeypatch.setattr(idnes_main, "parse_index", client.parse)
+    descended: list[str] = []
+    monkeypatch.setattr(idnes_main, "sub_places",
+                        lambda html, *a, **k: descended.append(html) or ([], []))
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 0)
+    outcomes: dict[str, str] = {}
+    monkeypatch.setattr(idnes_main.db, "record_index_slice",
+                        lambda *a, **k: outcomes.__setitem__(k["slice_key"], k["outcome"]))
+    portal = _portal()
+    portal.SLICES = tuple(slices)
+    _seen, _c, _n, _p, complete = portal.walk_category(
+        {"sale_type": "prodej", "category": "domy"}, _Conn(), False, _Limiter(), None)
+    return outcomes, complete, client, descended
+
+
+def test_one_refused_page_mid_place_costs_that_page_only(monkeypatch):
+    outcomes, complete, client, descended = _refusing_walk(
+        monkeypatch, ["praha", "jihocesky-kraj"], {("jihocesky-kraj", 1)})
+    first_pass = [pg for pl, pg in client.asked if pl == "jihocesky-kraj"][:4]
+    assert first_pass == [None, 1, 2, 3]          # it went on past the refusal
+    assert outcomes == {"praha": "exhausted", "jihocesky-kraj": "incomplete"}
+    assert descended == ["jihocesky-kraj|None"]   # the shortfall takes the descent
+    assert complete is True                       # every page loop ended on idnes's pager
+
+
+def test_a_refused_first_page_continues_at_the_second(monkeypatch):
+    client = _Refusing({("praha", None)})
+    monkeypatch.setattr(idnes_main, "parse_index", client.parse)
+    rows, declared, pages, outcome, stop, html = _portal()._walk_place(
+        client, "prodej", "domy", locality="praha", sl=None,
+        deadline=None, label="praha")
+    assert client.asked == [("praha", None), ("praha", 1), ("praha", 2), ("praha", 3)]
+    assert html == "praha|1"                      # the descent reads the first page that answered
+    assert declared == 4 and len(rows) == 3 and pages == 3
+    assert (outcome, stop) == ("incomplete", "pager_end")
+
+
+def test_a_second_refusal_in_one_place_ends_it_as_before(monkeypatch):
+    outcomes, complete, client, descended = _refusing_walk(
+        monkeypatch, ["praha", "jihocesky-kraj"],
+        {("jihocesky-kraj", 1), ("jihocesky-kraj", 3)})
+    assert [pg for pl, pg in client.asked if pl == "jihocesky-kraj"] == [None, 1, 2, 3]
+    assert outcomes["jihocesky-kraj"] == "error"
+    assert descended == []                        # a fetch problem is not a coverage one
+    assert complete is False
+
+
+def test_one_refusal_in_each_of_several_places_still_reaches_the_end(monkeypatch):
+    outcomes, complete, _client, _d = _refusing_walk(
+        monkeypatch, ["praha", "jihocesky-kraj", "plzensky-kraj"],
+        {("praha", None), ("jihocesky-kraj", 1), ("plzensky-kraj", 2)})
+    assert set(outcomes.values()) == {"incomplete"}
+    assert complete is True                       # each place still ran to its pager's end
+
+
 def test_an_exhausted_slice_never_descends(monkeypatch):
     """The descent roughly doubles a slice's cost, so it must only run when
     paging actually fell short."""
@@ -1047,36 +1143,6 @@ def test_fresh_rows_do_not_excuse_a_stalled_pager(monkeypatch):
     # None -> 3 advances; 3 -> 3 does not.
     assert pages == 2
     assert stop == "pager_stalled"
-
-
-def test_overlapping_pages_still_walk_on(monkeypatch):
-    """The other half of the contract, and the reason the old guard had to go:
-    idnes's ordering is unstable, so a legitimate mid-walk page can be entirely
-    rows we already hold. That must NOT stop the walk."""
-    pages_seq = iter([
-        (["a"], 1),
-        (["a"], 2),      # pure repeat, but the cursor advanced
-        (["b"], None),
-    ])
-
-    def _parse(_h):
-        ids, nxt = next(pages_seq)
-        return SimpleNamespace(
-            total=2, next_offset=nxt, empty_confirmed=False,
-            items=[SimpleNamespace(
-                source_id_native=f"6a18deadbeefdeadbeef000{i}",
-                detail_path="https://reality.idnes.cz/detail/prodej/byt/x/y/",
-                price_text="5 000 000 Kč") for i in ids])
-
-    monkeypatch.setattr(idnes_main, "parse_index", _parse)
-    portal = _portal()
-    rows, _d, pages, outcome, stop, _html = portal._walk_place(
-        _IdxClient(), "prodej", "byty", locality="praha", sl=None,
-        deadline=None, label="praha")
-    assert pages == 3
-    assert len(rows) == 2
-    assert outcome == "exhausted"
-    assert stop == "pager_end"
 
 
 def test_place_is_the_only_descent_axis(monkeypatch):

@@ -267,8 +267,10 @@ sorting ahead of everything. That is the fix for the real defect, which was amne
 speed — a walk that runs out of budget used to restart at the first category's first page, so the
 same head was re-walked while 8 of 10 categories were never touched at all. A category NOMINATES only when **every**
 slice was walked *and* each one ended on idnes's own last page; one `deadline`, `error` or
-`ceiling` — a stop of ours — holds the whole category open. Since 2026-09-08 the union no longer
-has to satisfy the national declared total (rule #3): that arithmetic is the ledger's `outcome`
+`ceiling` — a stop of ours — holds the whole category open. An `error` is ours when it ENDS a page loop
+(a place's second refused page); ONE page idnes refuses in a loop that runs on to its end costs that page
+alone (~26 ads short: descent, resample, page check) — evidence, never a veto (2026-10-24). Since
+2026-09-08 the union no longer has to satisfy the national declared total (rule #3): that arithmetic is the ledger's `outcome`
 and the runner's `COVERAGE` warning, not the gate. A slice one row short of its declared count has
 still reached the end of the index. An empty slice publishes no count, so `total` is `None` — identical to a degraded
 page — and is only accepted when idnes *says* it is empty ("momentálně tu není žádný inzerát",

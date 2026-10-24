@@ -182,10 +182,11 @@ child can only add rows of the same category, which cannot push the union past
 the declared total. The link list never has to be trusted.
 
 Descent runs **only on `incomplete`** — we paged to the pager's own end and came
-up short, which is the shortfall a finer query can fix. An `error` is a transport
-failure and a `degraded` page carries no total to measure a union against;
-descending on either would just multiply failed requests and relabel a fetch
-problem as a coverage one.
+up short, which is the shortfall a finer query can fix. An `error` (a place's
+SECOND refused page — since 2026-10-24 one refused page is skipped, so the place
+ends on its terminator ~26 short and descends) is a transport failure and a
+`degraded` page carries no total to measure a union against; descending on either
+would just multiply failed requests and relabel a fetch problem as a coverage one.
 
 ## The ledger (`portal_index_slices`, migration 454)
 
