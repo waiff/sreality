@@ -213,11 +213,8 @@ def test_an_open_stamps_the_callers_own_delivery(client: Any, service: _Opener) 
 
 
 def test_the_push_routes_are_mounted_as_a_users_not_an_admins() -> None:
-    from fastapi.routing import APIRoute
+    from tests.api._routes import method_routes
 
-    paths = {(m, r.path) for r in api_main.app.routes if isinstance(r, APIRoute) for m in r.methods}
-    paths |= {(m, r.path) for router in api_main.app.routes
-              for r in getattr(getattr(router, "original_router", None), "routes", [])
-              if isinstance(r, APIRoute) for m in r.methods}
+    paths = {(m, p) for m, p, _r in method_routes()}
     assert {("GET", "/push/key"), ("PUT", "/push/subscription"), ("DELETE", "/push/subscription"),
             ("POST", "/push/opened")} <= paths

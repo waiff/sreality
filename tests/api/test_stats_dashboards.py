@@ -23,7 +23,6 @@ fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 import psycopg  # noqa: E402
-from fastapi.routing import APIRoute  # noqa: E402
 
 from api import dependencies as deps  # noqa: E402
 from api import main as api_main  # noqa: E402
@@ -33,6 +32,7 @@ from api import tenant_pool  # noqa: E402
 from api.notifications import ON_EVENT_CONFLICT  # noqa: E402
 from api.routes.filter_presets import PRESETS  # noqa: E402
 from api.routes.stats_dashboards import DASHBOARDS  # noqa: E402
+from tests.api._routes import method_routes, reachable_calls  # noqa: E402
 from tests.api._script_conn import ScriptConn  # noqa: E402
 
 _SUB = "11111111-1111-1111-1111-111111111111"
@@ -540,34 +540,8 @@ def test_the_share_body_is_the_one_email_rule() -> None:
 # --- the routes' posture --------------------------------------------------------
 
 
-def _dashboard_routes() -> dict[str, APIRoute]:
-    out: dict[str, APIRoute] = {}
-
-    def walk(routes: Any) -> None:
-        for r in routes:
-            if isinstance(r, APIRoute):
-                if r.path.startswith("/stats/dashboard"):
-                    out.update({f"{m} {r.path}": r for m in r.methods})
-                continue
-            nested = getattr(getattr(r, "original_router", None), "routes", None)
-            walk(nested if nested is not None else getattr(r, "routes", None) or [])
-
-    walk(api_main.app.routes)
-    return out
-
-
-def _calls(route: APIRoute) -> set:
-    out, stack = set(), list(route.dependant.dependencies)
-    while stack:
-        d = stack.pop()
-        if d.call is not None:
-            out.add(d.call)
-        stack.extend(d.dependencies)
-    return out
-
-
 def test_every_dashboard_route_rides_the_tenant_connection_and_the_writes_that_insert_name_an_account():
-    routes = _dashboard_routes()
+    routes = {f"{m} {p}": r for m, p, r in method_routes() if p.startswith("/stats/dashboard")}
     assert set(routes) == {
         "GET /stats/dashboards", "POST /stats/dashboards", "PUT /stats/dashboards/reorder",
         "GET /stats/dashboards/{dashboard_id}", "PUT /stats/dashboards/{dashboard_id}",
@@ -579,7 +553,7 @@ def test_every_dashboard_route_rides_the_tenant_connection_and_the_writes_that_i
     # The working-board GET is a tenant read (shape 1): RLS alone, no account.
     own = {"POST /stats/dashboards", "POST /stats/dashboards/{dashboard_id}/shares", "PUT /stats/dashboard"}
     for key, route in routes.items():
-        calls = _calls(route)
+        calls = reachable_calls(route)
         assert tenant_pool.tenant_conn in calls, f"{key} left the tenant connection"
         assert deps.get_db_conn not in calls and deps.require_token not in calls, key
         assert (tenant_pool.require_account_id in calls) == (key in own), key

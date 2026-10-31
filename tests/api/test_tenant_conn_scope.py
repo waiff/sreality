@@ -20,7 +20,7 @@ from api import main as api_main
 from api import pipeline as pipeline_module
 from api import tenant_pool
 from tests.api._jwt import mint
-from tests.api._routes import flat_routes
+from tests.api._routes import dependants, flat_routes
 from tests.api._script_conn import ScriptConn
 
 # Curation sync W0 (docs/design/curation-sync.md § 3.6): FastAPI closes a function-scoped dependency after the
@@ -68,18 +68,12 @@ def test_census_no_bare_depends_on_tenant_conn_outside_the_alias() -> None:
     assert not found, f"take `conn: tenant_pool.TenantConn`, never Depends(tenant_conn): {found}"
 
 
-def _subs(dependant: Any) -> Iterator[Any]:
-    for sub in dependant.dependencies:
-        yield sub
-        yield from _subs(sub)
-
-
 def test_every_route_reaches_the_tenant_connection_only_through_the_function_scoped_alias() -> None:
     _type, depends = typing.get_args(tenant_pool.TenantConn)
     assert depends.dependency is tenant_pool.tenant_conn and depends.scope == "function"
     reached: set[str] = set()
-    for route in flat_routes(api_main.app.routes):
-        for sub in _subs(route.dependant):
+    for route in flat_routes():
+        for sub in dependants(route):
             if sub.call is tenant_pool.tenant_conn:
                 reached.add(route.path)
                 assert sub.scope == "function", f"{route.path}: tenant_conn outside TenantConn"

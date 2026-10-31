@@ -112,9 +112,9 @@ def test_a_statement_merges_every_letter_in_one_transaction_or_nothing(merge):
 
 def test_the_merge_list_routes_are_gone():
     """MS16/MS21: no screen read them; the toast and the carry record are the record."""
-    from tests.api.test_admin_route_coverage import _api_routes
+    from tests.api._routes import method_routes
 
-    paths = {path for _method, path, _route in _api_routes()}
+    paths = {path for _method, path, _route in method_routes()}
     assert "/properties/merge" in paths
     assert not paths & {"/properties/merges", "/properties/merged"}
 

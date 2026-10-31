@@ -22,12 +22,11 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
-from fastapi.routing import APIRoute  # noqa: E402
-
 from api import dependencies as deps  # noqa: E402
 from api import main as api_main  # noqa: E402
 from api import tenant_pool  # noqa: E402
 from api.routes import stats_dashboards as sd  # noqa: E402
+from tests.api._routes import method_routes, reachable_calls  # noqa: E402
 from tests.api._script_conn import ScriptConn  # noqa: E402
 from toolkit import stats_registry as sr  # noqa: E402
 
@@ -196,23 +195,12 @@ def test_the_working_board_read_under_x_act_as_is_the_callers_own(client, conn) 
 
 
 def test_both_routes_ride_the_tenant_connection_and_only_the_write_names_its_account() -> None:
-    routes = {(m, r.path): r for r in api_main.app.routes if isinstance(r, APIRoute)
-              for m in r.methods if r.path == "/stats/dashboard"}
-    if not routes:  # FastAPI >= 0.13x wraps an included router
-        for r in api_main.app.routes:
-            for n in getattr(getattr(r, "original_router", None), "routes", None) or []:
-                if isinstance(n, APIRoute) and n.path == "/stats/dashboard":
-                    routes.update({(m, n.path): n for m in n.methods})
+    routes = {(m, p): r for m, p, r in method_routes() if p == "/stats/dashboard"}
     assert set(routes) == {("GET", "/stats/dashboard"), ("PUT", "/stats/dashboard")}
-    for route in routes.values():
-        calls, stack = set(), list(route.dependant.dependencies)
-        while stack:
-            d = stack.pop()
-            if d.call is not None:
-                calls.add(d.call)
-            stack.extend(d.dependencies)
+    for (method, _path), route in routes.items():
+        calls = reachable_calls(route)
         assert tenant_pool.tenant_conn in calls
-        assert (tenant_pool.require_account_id in calls) == (route.methods == {"PUT"})
+        assert (tenant_pool.require_account_id in calls) == (method == "PUT")
         assert deps.get_db_conn not in calls and deps.require_token not in calls
 
 

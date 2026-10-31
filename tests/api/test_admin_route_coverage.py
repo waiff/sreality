@@ -26,8 +26,7 @@ from fastapi.routing import APIRoute  # noqa: E402
 
 from api import dependencies as deps  # noqa: E402
 from api import tenant_pool  # noqa: E402
-from api.main import app  # noqa: E402
-from tests.api._routes import flat_routes  # noqa: E402
+from tests.api._routes import auth_bucket, method_routes, reachable_calls  # noqa: E402
 
 # Routes that legitimately authenticate some other way. Every entry is a deliberate,
 # reviewable decision — adding one should take an argument, not a reflex.
@@ -61,48 +60,10 @@ _MOUNT_SENTINELS: tuple[str, ...] = (
 )
 
 
-def _reachable_calls(dependant) -> set:
-    """Every dependency callable reachable from a route, including nested ones."""
-    seen: set[int] = set()
-    out: set = set()
-    stack = list(dependant.dependencies)
-    while stack:
-        d = stack.pop()
-        call = getattr(d, "call", None)
-        if call is not None and id(call) not in seen:
-            seen.add(id(call))
-            out.add(call)
-        stack.extend(d.dependencies)
-    return out
-
-
-def _bucket(route: APIRoute) -> str:
-    calls = _reachable_calls(route.dependant)
-    if deps.require_admin in calls:
-        return "admin"
-    if tenant_pool.tenant_conn in calls or deps.verify_jwt in calls:
-        return "tenant"
-    if deps.require_token in calls or deps.token_claims in calls:
-        return "token"
-    # account_scope is require_token's reader (`_bearer`: a verified JWT) plus a
-    # read scope, so it buckets with it.
-    if deps.account_scope in calls:
-        return "token"
-    return "public"
-
-
-def _api_routes() -> list[tuple[str, str, APIRoute]]:
-    return [
-        (method, r.path, r)
-        for r in flat_routes(app.routes)
-        for method in sorted(r.methods - {"HEAD", "OPTIONS"})
-    ]
-
-
 def test_admin_routers_are_mounted() -> None:
     """If include_router silently mounted nothing, the assertions below would hold
     over an empty route table — so fail loudly instead of passing vacuously."""
-    paths = {p for _, p, _ in _api_routes()}
+    paths = {p for _, p, _ in method_routes()}
     missing = [s for s in _MOUNT_SENTINELS if not any(p.startswith(s) for p in paths)]
     assert not missing, (
         f"no routes mounted under {missing} — the coverage assertions below would be "
@@ -113,9 +74,9 @@ def test_admin_routers_are_mounted() -> None:
 def test_admin_surfaces_require_admin() -> None:
     """Every route under an admin prefix must resolve to require_admin."""
     offenders = sorted(
-        f"  {method} {path} -> {_bucket(route)}"
-        for method, path, route in _api_routes()
-        if path.startswith(_ADMIN_PREFIXES) and _bucket(route) != "admin"
+        f"  {method} {path} -> {auth_bucket(route)}"
+        for method, path, route in method_routes()
+        if path.startswith(_ADMIN_PREFIXES) and auth_bucket(route) != "admin"
     )
     assert not offenders, (
         "admin-prefixed route(s) are not admin-gated. Add "
@@ -132,7 +93,7 @@ def _takes_force_refresh(route: APIRoute) -> bool:
 def test_a_forced_refresh_is_admin_gated_wherever_it_is_accepted() -> None:
     """A body field `force_refresh` re-buys a cached LLM answer: every route accepting it calls
     `deps.require_admin_to_force` (M0, #2059). The gate reads the body, so no dependency can carry it."""
-    accepting = [(m, p, r) for m, p, r in _api_routes() if _takes_force_refresh(r)]
+    accepting = [(m, p, r) for m, p, r in method_routes() if _takes_force_refresh(r)]
     assert len(accepting) >= 2, "the census found no route taking force_refresh: check how it reads the body"
     ungated = sorted(f"  {m} {p}" for m, p, r in accepting
                      if "require_admin_to_force(" not in inspect.getsource(r.endpoint))
@@ -144,8 +105,8 @@ def test_no_route_is_unauthenticated_by_accident() -> None:
     known-public endpoints may."""
     unexpected = sorted(
         f"  {method} {path}"
-        for method, path, route in _api_routes()
-        if _bucket(route) == "public" and (method, path) not in _PUBLIC_ALLOWLIST
+        for method, path, route in method_routes()
+        if auth_bucket(route) == "public" and (method, path) not in _PUBLIC_ALLOWLIST
     )
     assert not unexpected, (
         "route(s) carry NO authentication dependency. Add one, or allowlist with a "
@@ -168,7 +129,7 @@ def test_no_route_is_unauthenticated_by_accident() -> None:
 # X-Act-As the owner whose edit share migration 641 grants; tests/api/test_acting_routes_census.py).
 #
 # SCOPE, stated honestly. The subject is routes reaching `tenant_pool.tenant_conn`.
-# `_bucket` says "tenant" for anything reaching `verify_jwt`, which also covers the
+# `auth_bucket` says "tenant" for anything reaching `verify_jwt`, which also covers the
 # `/brokers/*` + `POST /estimations` routes — those run on the service-role
 # `get_db_conn`, where `verify_jwt` is authentication only and RLS is not the scope.
 # They are EXCLUDED structurally, not by a copy of one sentence each: an allowlist
@@ -346,9 +307,9 @@ def _tenant_conn_routes() -> list[tuple[str, str, set]]:
     """(method, path, reachable calls) for every route on the TENANT CONNECTION."""
     return [
         (method, path, calls)
-        for method, path, route in _api_routes()
-        if _bucket(route) == "tenant"
-        and tenant_pool.tenant_conn in (calls := _reachable_calls(route.dependant))
+        for method, path, route in method_routes()
+        if auth_bucket(route) == "tenant"
+        and tenant_pool.tenant_conn in (calls := reachable_calls(route))
     ]
 
 
@@ -386,14 +347,14 @@ def test_tenant_routes_are_account_scoped() -> None:
 def test_route_scope_census_is_not_vacuous() -> None:
     """The census's own mount sentinel (same job as `_MOUNT_SENTINELS` above).
 
-    If `_bucket` stopped returning "tenant", or the tenant routers stopped mounting,
+    If `auth_bucket` stopped returning "tenant", or the tenant routers stopped mounting,
     the assertion above would hold over an empty list — green and worthless. Pin the
     population, one known-good member of it, and the allowlist's own freshness.
     """
     tenant = _tenant_conn_routes()
     assert tenant, (
         "no tenant-connection routes found — test_tenant_routes_are_account_scoped "
-        "would pass vacuously. Check _bucket and the router mounts."
+        "would pass vacuously. Check auth_bucket and the router mounts."
     )
     cards = [c for m, p, c in tenant if (m, p) == ("POST", "/pipeline/cards")]
     assert cards, "POST /pipeline/cards is not bucketed as a tenant-connection route"
@@ -425,20 +386,20 @@ _FEEDBACK_POST = ("POST", "/estimations/{run_id}/feedback")
 
 
 def test_estimation_child_routes_ride_the_tenant_connection() -> None:
-    routes = {(m, p): r for m, p, r in _api_routes()}
+    routes = {(m, p): r for m, p, r in method_routes()}
     for key in (*_ESTIMATION_CHILD_READS, _FEEDBACK_POST):
         assert key in routes, f"{key} is not mounted — the census below would be vacuous"
-        calls = _reachable_calls(routes[key].dependant)
+        calls = reachable_calls(routes[key])
         assert deps.verify_jwt in calls, f"{key} no longer verifies a real JWT"
         assert deps.require_token not in calls, (
             f"{key} is back on require_token — the claims it discards are what scopes this read"
         )
     for key in _ESTIMATION_CHILD_READS:
-        calls = _reachable_calls(routes[key].dependant)
+        calls = reachable_calls(routes[key])
         assert tenant_pool.tenant_conn in calls, f"{key} left the tenant connection"
 
     post = routes[_FEEDBACK_POST]
-    calls = _reachable_calls(post.dependant)
+    calls = reachable_calls(post)
     for held_too_early in (tenant_pool.tenant_conn, deps.get_db_conn, deps.get_llm_client):
         assert held_too_early not in calls, (
             f"{_FEEDBACK_POST} depends on {held_too_early.__name__} again — see the "
@@ -461,9 +422,9 @@ def test_estimation_child_routes_ride_the_tenant_connection() -> None:
 def test_the_share_routes_open_the_service_role_only_after_their_gate(key: tuple[str, str]) -> None:
     # tenancy.md's second "tenant gate, then a service-role write": a recipient's or a
     # bystander's refused POST must not have checked out a service-role connection first.
-    routes = {(m, p): r for m, p, r in _api_routes()}
+    routes = {(m, p): r for m, p, r in method_routes()}
     share = routes[key]
-    calls = _reachable_calls(share.dependant)
+    calls = reachable_calls(share)
     assert tenant_pool.tenant_conn in calls
     assert deps.get_db_conn not in calls, "the share route took the service role as a dependency again"
     assert "deps.open_background_conn" in inspect.getsource(share.endpoint)

@@ -38,7 +38,7 @@ pytest.importorskip("fastapi")
 from fastapi.routing import APIRoute  # noqa: E402
 
 from api import tenant_pool  # noqa: E402
-from api.main import app  # noqa: E402
+from tests.api._routes import method_routes, reachable_calls  # noqa: E402
 
 CURATION = frozenset({
     "collections", "tags", "property_notes", "collection_properties", "property_tags",
@@ -81,29 +81,7 @@ _NOT_TABLES = frozenset({"set", "of"})  # UPDATE ... SET; SELECT ... FOR UPDATE 
 
 
 def _routes() -> list[tuple[str, APIRoute]]:
-    out: list[tuple[str, APIRoute]] = []
-
-    def walk(routes: Any) -> None:
-        for r in routes:
-            if isinstance(r, APIRoute):
-                out.extend((f"{m} {r.path}", r) for m in sorted(r.methods - {"HEAD", "OPTIONS"}))
-                continue
-            nested = getattr(getattr(r, "original_router", None), "routes", None)
-            walk(nested if nested is not None else getattr(r, "routes", None) or [])
-
-    walk(app.routes)
-    return out
-
-
-def _declared(route: APIRoute) -> set[Callable[..., Any]]:
-    seen: set[Callable[..., Any]] = set()
-    stack = list(route.dependant.dependencies)
-    while stack:
-        d = stack.pop()
-        if d.call is not None:
-            seen.add(d.call)
-        stack.extend(d.dependencies)
-    return seen
+    return [(f"{m} {p}", r) for m, p, r in method_routes()]
 
 
 def _strings(fn: Callable[..., Any], tree: ast.AST) -> list[str]:
@@ -173,7 +151,7 @@ def _by_dependency() -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     acting: dict[str, set[str]] = {}
     own: dict[str, set[str]] = {}
     for key, route in _routes():
-        deps = _declared(route)
+        deps = reachable_calls(route)
         if tenant_pool.require_acting_account_id in deps:
             acting[key] = _written_tables(route.endpoint)
         elif tenant_pool.require_account_id in deps:
@@ -185,7 +163,7 @@ def _rls_only() -> dict[str, tuple[set[str], bool]]:
     """Tenant routes declaring neither write-account dependency: the header acts through RLS alone."""
     out: dict[str, tuple[set[str], bool]] = {}
     for key, route in _routes():
-        deps = _declared(route)
+        deps = reachable_calls(route)
         if (tenant_pool.tenant_conn in deps
                 and tenant_pool.require_acting_account_id not in deps
                 and tenant_pool.require_account_id not in deps):

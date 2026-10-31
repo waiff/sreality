@@ -19,13 +19,12 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
-from fastapi.routing import APIRoute
-
 from api import dependencies as deps
 from api import main as api_main
 from api import saved_sets as ss
 from api import tenant_pool
 from api.routes.filter_presets import GROUPS, PRESETS
+from tests.api._routes import flat_routes, reachable_calls
 
 _SUB = "11111111-1111-1111-1111-111111111111"
 _ACCT = "33333333-3333-3333-3333-333333333333"
@@ -423,40 +422,14 @@ def test_create_preset_without_an_account_is_400(client, store, monkeypatch):
     assert store["presets"] == {}
 
 
-def _preset_routes() -> list[APIRoute]:
-    routes = [
-        r
-        for r in api_main.app.routes
-        if isinstance(r, APIRoute) and r.path.startswith("/filter-preset")
-    ]
-    if not routes:  # FastAPI >= 0.13x wraps an included router
-        for r in api_main.app.routes:
-            nested = getattr(getattr(r, "original_router", None), "routes", None) or []
-            routes += [
-                n for n in nested
-                if isinstance(n, APIRoute) and n.path.startswith("/filter-preset")
-            ]
-    return routes
-
-
-def _calls(route: APIRoute) -> set:
-    out, stack = set(), list(route.dependant.dependencies)
-    while stack:
-        d = stack.pop()
-        if d.call is not None:
-            out.add(d.call)
-        stack.extend(d.dependencies)
-    return out
-
-
 def test_every_preset_route_rides_the_tenant_connection():
     """No preset or preset-group route accepts the static bundle token or the
     service-role connection: it proves only 'loaded the SPA', and RLS is the boundary."""
-    routes = _preset_routes()
+    routes = [r for r in flat_routes() if r.path.startswith("/filter-preset")]
     # Six saved-set routes per kind, plus the presets' layout.
     assert len(routes) == 13, [f"{sorted(r.methods)} {r.path}" for r in routes]
     for r in routes:
-        calls = _calls(r)
+        calls = reachable_calls(r)
         label = f"{sorted(r.methods)} {r.path}"
         assert tenant_pool.tenant_conn in calls, f"{label} left the tenant connection"
         assert deps.require_token not in calls, f"{label} accepts the bundle token again"

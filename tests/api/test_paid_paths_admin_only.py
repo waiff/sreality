@@ -14,12 +14,12 @@ from typing import Any
 import pytest
 
 pytest.importorskip("fastapi")
-from fastapi.routing import APIRoute  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from api import dependencies as deps  # noqa: E402
 from api import main as api_main  # noqa: E402
 from tests.api._jwt import mint  # noqa: E402
+from tests.api._routes import method_routes  # noqa: E402
 
 _MEMBER = {"Authorization": f"Bearer {mint({'sub': 'trial-user'})}"}
 _ADMIN = {"Authorization": f"Bearer {mint({'sub': 'operator', 'app_metadata': {'is_admin': True}})}"}
@@ -37,12 +37,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
 
 
 def _building_routes() -> list[tuple[str, str]]:
-    out = [
-        (method, re.sub(r"\{[^}]+\}", "1", r.path))
-        for r in api_main.app.routes
-        if isinstance(r, APIRoute) and r.path.startswith("/buildings")
-        for method in sorted(r.methods - {"HEAD", "OPTIONS"})
-    ]
+    out = [(m, re.sub(r"\{[^}]+\}", "1", p)) for m, p, _r in method_routes() if p.startswith("/buildings")]
     assert len(out) >= 10, out
     return out
 

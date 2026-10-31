@@ -370,20 +370,20 @@ def test_the_unmasked_routes_still_stamp_the_policy(
                                   "/broker-review/candidates"])
 def test_a_read_counting_the_broker_book_is_bounded(path: str) -> None:
     """READ ONLY at 8 s, as the board's own read (tenant_pool.read_conn; tests/test_broker_board_live.py)."""
-    from tests.api.test_admin_route_coverage import _api_routes, _reachable_calls
+    from tests.api._routes import method_routes, reachable_calls
 
-    (route,) = [r for m, p, r in _api_routes() if (m, p) == ("GET", path)]
-    assert tenant_pool.read_conn in _reachable_calls(route.dependant)
+    (route,) = [r for m, p, r in method_routes() if (m, p) == ("GET", path)]
+    assert tenant_pool.read_conn in reachable_calls(route)
 
 
 def test_the_pii_gate_covers_every_non_admin_broker_route() -> None:
-    from tests.api.test_admin_route_coverage import _api_routes, _reachable_calls
+    from tests.api._routes import method_routes, reachable_calls
 
     live = {
         (method, path)
-        for method, path, route in _api_routes()
+        for method, path, route in method_routes()
         if path.startswith("/brokers")
-        and deps.require_admin not in _reachable_calls(route.dependant)
+        and deps.require_admin not in reachable_calls(route)
     }
     covered = {(m, t) for m, t, _, _ in _NON_ADMIN_CALLS + _UNMASKED_CALLS}
     assert live == covered, (
@@ -396,12 +396,12 @@ def test_no_broker_route_rides_the_static_token() -> None:
     caller's claims, so `apply_pii_policy` could not see admin status — a broker
     read re-gated on it would be a silent regression (until 2026-10-13 that gate
     also admitted the bundle-public static key: unauthenticated PII access)."""
-    from tests.api.test_admin_route_coverage import _api_routes, _reachable_calls
+    from tests.api._routes import method_routes, reachable_calls
 
     offenders = sorted(
         f"  {method} {path}"
-        for method, path, route in _api_routes()
+        for method, path, route in method_routes()
         if path.startswith("/brokers")
-        and deps.require_token in _reachable_calls(route.dependant)
+        and deps.require_token in reachable_calls(route)
     )
     assert not offenders, "broker route(s) back on the shared secret:\n" + "\n".join(offenders)

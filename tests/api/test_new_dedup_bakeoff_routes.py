@@ -151,16 +151,12 @@ def test_buckets_passes_its_keys_through_and_needs_them(
 
 
 def test_every_bakeoff_route_is_admin_gated() -> None:
-    from tests.api._routes import flat_routes
+    from tests.api._routes import flat_routes, reachable_calls
 
-    routes = [r for r in flat_routes(api_main.app.routes)
-              if r.path.startswith(PREFIX)]
+    routes = [r for r in flat_routes() if r.path.startswith(PREFIX)]
     assert len(routes) == 6, [r.path for r in routes]
     for route in routes:
-        names = {getattr(d.call, "__name__", "") for d in route.dependant.dependencies}
-        nested = {getattr(sub.call, "__name__", "")
-                  for d in route.dependant.dependencies for sub in d.dependencies}
-        assert "require_admin" in (names | nested), route.path
+        assert deps.require_admin in reachable_calls(route), route.path
 
 
 def test_the_gate_actually_rejects_without_an_admin_session() -> None:

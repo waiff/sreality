@@ -17,9 +17,8 @@ from api import dependencies as deps
 from api import main as api_main
 from api import property_read as pr
 from tests.api._jwt import mint
-from tests.api._routes import flat_routes
+from tests.api._routes import auth_bucket, flat_routes
 from tests.api._script_conn import ScriptConn
-from tests.api.test_admin_route_coverage import _bucket
 
 _QUERIES = Path(__file__).resolve().parents[2] / "frontend/src/lib/queries.ts"
 _URL = "/properties/7/price-history"
@@ -97,5 +96,5 @@ def test_requires_a_token_and_never_the_tenant_connection(serve, monkeypatch) ->
     client = TestClient(api_main.app)
     assert client.get(_URL, headers=AUTH).status_code == 200
     assert client.get(_URL).status_code == 401
-    (route,) = [r for r in flat_routes(api_main.app.routes) if r.path.endswith("/price-history")]
-    assert _bucket(route) == "token"  # require_token; no tenant_conn, no verify_jwt
+    (route,) = [r for r in flat_routes() if r.path.endswith("/price-history")]
+    assert auth_bucket(route) == "token"  # require_token; no tenant_conn, no verify_jwt
