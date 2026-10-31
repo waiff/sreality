@@ -85,8 +85,7 @@ def test_bilovec_matches_through_the_deaccented_form():
     The CZ municipality lookup missed it and a fuzzy STREET-level fallback landed in western
     Slovakia, ~180 km off, with obec/okres/region/ku_id all NULL."""
     binding = _bind([mm.claim(1, "obec_name", value_text="Bilovec", source="realitymix")])
-    assert binding.admin_unit_id == 10
-    assert binding.granularity == "obec"
+    assert (binding.admin_unit_id, binding.target_kind) == (10, "admin_unit")
 
 
 def test_a_fuzzy_street_match_can_never_become_an_obec_resolution():
@@ -98,7 +97,6 @@ def test_a_fuzzy_street_match_can_never_become_an_obec_resolution():
     ])
     assert binding.rung in ("R2", "R3")
     assert binding.target_kind == "street"
-    assert binding.granularity == "street"
     assert binding.obec_kod == 599212
 
 
@@ -423,21 +421,15 @@ def test_parts_named_by_two_sources_are_one_candidate():
             "cast_obce_or_quarter", "high"), claimed
 
 
-def test_a_claimed_part_of_another_level_stands_against_a_climbed_one():
-    """Review: a claimed MOMC ("Brno-Židenice") and the část a town name climbed from
-    ("Židenice") are not comparable; the claim stands, as in v5.6. Two parts of one level that
-    differ still publish none (19009248)."""
-    mirror = mm.statutory_city_mirror()
-    mirror.units += [mm._unit(108, "cast_obce", 411833, "Židenice", "zidenice",
-                              "k116.o3702.b582786.c411833", parent=103),
-                     mm._unit(109, "momc", 551082, "Brno-Židenice", "brno zidenice",
-                              "k116.o3702.b582786.m551082", parent=103)]
-    mirror.points.append(AddressPoint(kod_adm=1, obec_unit_id=103, obec_kod=582786,
-                                      psc="61500", lat=None, lon=None))
-    resolution = _resolve([mm.claim(1, "obec_name", value_text="Židenice"),
-                           mm.claim(2, "cast_obce_name", value_text="Brno-Židenice"),
-                           mm.claim(3, "psc", value_text="61500")], mirror)
-    assert (resolution.obec_kod, resolution.cast_obce_kod) == (582786, 551082)
+def test_a_claimed_eponymous_main_part_still_binds_and_a_ku_claim_climbs_to_its_part():
+    """W5's guard: the part claim keeps no eponymous rule (38,095 active rows are bound to the
+    main část that shares its town's name). And a part claim matches like a town name (Q2): the
+    KÚ "Podolí u Mohelnice" binds the část its qualifier-free name spells."""
+    main = _w4(1, ("obec_name", "Harrachov"), ("cast_obce_name", "Harrachov"), ("psc", "51246"))
+    assert (main.cast_obce_kod, main.granularity) == (37231, "cast_obce_or_quarter")
+    climbed = _w4(1, ("obec_name", "Mohelnice"), ("cast_obce_name", "Podolí u Mohelnice"),
+                  ("psc", "78985"))
+    assert (climbed.obec_kod, climbed.cast_obce_kod) == (540471, 124320)
 
 
 def test_1a_a_climbed_village_against_a_claimed_part_publishes_no_part():
@@ -643,29 +635,55 @@ def test_2a_2b_2c_the_reader_rows_resolve_where_the_operator_put_them():
         assert (resolution.obec_kod, resolution.ulice_kod) == (569810, street), kind
 
 
-# ------------------------------------------------ v5.9: the words decide (ruling 2026-10-30)
+# ------------------------------------------------ v5.10: one truth (ruling Q3, 2026-10-31)
+
+_PRAHA_POINT = (50.0755, 14.4378)
+_INSIDE, _OUTSIDE = (50.0900, 14.4500), (50.1477, 14.1028)   # in Praha; in Kladno, 25 km off
 
 
-def test_place_sets_aside_only_a_declared_blurred_pin_known_to_lie_outside_the_bound_town():
-    """`pin_inside_bound_obec` is the caller's one registry read. None (never asked) and True
-    keep the pin; False sets it aside only when the portal DECLARED the pin blurred — an exact
-    or undeclared pin outside the town is kept, as before, and CHECK flags it."""
+def _pinned(label: str | None, pin: tuple[float, float], *words) -> list:
+    """The pin as its portal states it: a precise label rides on the coordinate, any other is
+    a separate declaration (blur-declared where its contract says so)."""
+    on_pin = label in step_bind.PRECISE_DECLARED_LABELS
+    claims = [*words, mm.claim(2, "coordinate", lat=pin[0], lon=pin[1],
+                               declared_precision_label=label if on_pin else None)]
+    if label and not on_pin:
+        blurred = label in step_bind.BLURRED_DECLARED_LABELS | {"no_exact_address"}
+        claims.append(mm.claim(3, "precision_declaration", value_text=label,
+                               declared_precision_label=label.lower(),
+                               blur_evidence="declared" if blurred else "none"))
+    return claims
+
+
+@pytest.mark.parametrize("label", ["gps", "accurate", None, "Point", "no_exact_address",
+                                   "approximate_location"])
+def test_one_truth_a_pin_places_a_row_only_inside_the_town_the_words_bound(label):
+    """Ruling Q3 for every portal and label: a pin inside the town the words bound refines (bar
+    bazos' AREA marker, which never places a row the words bound); a pin outside it is never
+    the position — FILL stands the row at the town, flagged; without words the pin names its
+    town (R7) and stays."""
+    praha = mm.claim(1, "obec_name", value_text="Praha")
+    inside = _resolve(_pinned(label, _INSIDE, praha))
+    outside = _resolve(_pinned(label, _OUTSIDE, praha))
+    alone = _resolve(_pinned(label, _OUTSIDE))
+    expected = _PRAHA_POINT if label in step_bind.AREA_MARKER_LABELS else _INSIDE
+    assert ((inside.lat, inside.lon), inside.disputed) == (expected, None)
+    assert ((outside.lat, outside.lon), outside.disputed) == (_PRAHA_POINT, "pin_outside_obec")
+    assert (alone.obec_kod, (alone.lat, alone.lon), alone.disputed) == (532053, _OUTSIDE, None)
+    assert inside.granularity == outside.granularity == alone.granularity == "obec"
+
+
+def test_one_truth_a_pin_abroad_never_places_a_row_the_words_bound():
+    """A pin in Berlin with a Czech town stands at the town, `pin_outside_cz`; with only an
+    okres (R9), at the okres's point. The containment read is asked once, for both readers."""
+    berlin = mm.claim(2, "coordinate", lat=52.52, lon=13.405)
+    town = _resolve([mm.claim(1, "obec_name", value_text="Praha"), berlin])
+    assert ((town.lat, town.lon), town.disputed) == (_PRAHA_POINT, "pin_outside_cz")
+    region = _resolve([mm.claim(1, "okres_name", value_text="Liberec"), berlin])
+    assert (region.granularity, region.lat, region.lon) == ("okres", 50.7663, 15.0562)
     binding = _bind([mm.claim(1, "obec_name", value_text="Praha")])
-    pin = mm.claim(2, "coordinate", lat=49.7573, lon=18.0158)
-    blurred = step_bind.DeclaredPrecision(label="approximate_location", blurred=True,
-                                          claim_ids=(3,))
-    undeclared = step_bind.DeclaredPrecision(label=None, blurred=False, claim_ids=())
-    exact = step_bind.DeclaredPrecision(label="gps", blurred=False, claim_ids=(3,))
-    place = step_bind.place
-    assert place(binding, pin, declared=blurred, pin_inside_bound_obec=False).origin == "none"
-    assert place(binding, pin, declared=blurred, pin_inside_bound_obec=True).origin == "portal_pin"
-    assert place(binding, pin, declared=blurred).origin == "portal_pin"
-    assert place(binding, pin, declared=undeclared, pin_inside_bound_obec=False).origin == "portal_pin"
-    assert place(binding, pin, declared=exact, pin_inside_bound_obec=False).origin == "portal_pin"
-    # The question itself, asked once for both readers: not asked without a bound town or on
-    # a pin-derived rung; False outside; True inside.
     ask = step_bind.pin_inside_bound_obec
-    assert ask(binding, pin, mm.default_mirror()) is False
-    assert ask(binding, mm.claim(4, "coordinate", lat=50.0900, lon=14.4500), mm.default_mirror()) is True
+    assert ask(binding, berlin, mm.default_mirror()) is False
+    assert ask(binding, mm.claim(4, "coordinate", lat=50.09, lon=14.45), mm.default_mirror())
     assert ask(binding, None, mm.default_mirror()) is None
-    assert ask(replace(binding, rung="R7"), pin, mm.default_mirror()) is None
+    assert ask(replace(binding, rung="R7"), berlin, mm.default_mirror()) is None

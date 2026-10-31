@@ -332,11 +332,15 @@ def test_a_street_in_the_named_town_carries_the_registers_part_not_the_adverts()
     assert resolution.house_number_cp is None
 
 
-def test_a_street_across_parts_or_in_a_town_the_advert_does_not_name_carries_no_part():
-    """Fail closed: RÚIAN draws no část polygon, so a street across two parts gets none; a
-    town only the PSČ and a part-of-town claim supplied, or a typo'd street (R3), lends none."""
-    for resolution in (_stefanikova((71, 409871), (72, 409847)),
-                       _stefanikova((71, 409871), town=False),
+def test_a_street_keeps_the_claimed_part_only_where_it_has_doors():
+    """Q2 (W5): RÚIAN draws no část polygon, so a street across two parts keeps the advert's
+    Třebeš because the street has doors there; in a town only the PSČ and the part claim
+    supplied, the same; a street whose doors are all elsewhere, or a typo'd one (R3), lends
+    none."""
+    across = _stefanikova((71, 409871), (72, 409847))
+    unnamed = _stefanikova((72, 409847), town=False)
+    assert across.cast_obce_kod == unnamed.cast_obce_kod == 409847
+    for resolution in (_stefanikova((71, 409871), town=False),
                        _stefanikova((71, 409871), street="Štefánikovva")):
         assert (resolution.street_name, resolution.cast_obce_kod) == ("Štefánikova", None)
 

@@ -69,18 +69,47 @@ def _same(lo: int, hi: int, on: str = "2026-10-28") -> dict[str, Any]:
 
 
 def test_blocks_are_each_movers_old_and_new_block_at_the_engines_grain():
-    """E300's grain: a quarter in a split city, the town elsewhere; a split-city side with no
-    quarter would mean exporting the whole city, so it is left out and counted."""
+    """E300's grain: a quarter in a split city, the town elsewhere. A split-city side with no
+    quarter would mean exporting the whole city, so its mover rides ONE `ids` block with every
+    ad a ruling or its property ties to it (W5): both arms then hold the pair."""
     movers = [
-        {"old": {"obec_kod": PRAHA, "cast_obce_kod": 490245},
+        {"listing_id": 1, "old": {"obec_kod": PRAHA, "cast_obce_kod": 490245},
          "new": {"obec_kod": PRAHA, "cast_obce_kod": 400000}},
-        {"old": {"obec_kod": BEROUN, "cast_obce_kod": 12},
+        {"listing_id": 2, "old": {"obec_kod": BEROUN, "cast_obce_kod": 12},
          "new": {"obec_kod": BRNO, "cast_obce_kod": None}},
-        {"old": None, "new": {"obec_kod": BEROUN, "cast_obce_kod": 13}},
-        {"old": {"obec_kod": None}, "new": {"obec_kod": PRAHA, "cast_obce_kod": 490245}},
+        {"listing_id": 3, "old": None, "new": {"obec_kod": BEROUN, "cast_obce_kod": 13}},
+        {"listing_id": 4, "old": {"obec_kod": None},
+         "new": {"obec_kod": PRAHA, "cast_obce_kod": 490245}},
+        {"listing_id": 5, "old": {"obec_kod": PRAHA, "cast_obce_kod": None},
+         "new": {"obec_kod": PRAHA, "cast_obce_kod": 400000}},
     ]
-    assert shadow.blocks_for(movers) == (
-        ["quarter:490245", "quarter:400000", f"town:{BEROUN}"], 1)
+    asked: list[list[int]] = []
+    blocks = shadow.blocks_for(movers, lambda ids: asked.append(ids) or [7, 2])
+    assert blocks == ["quarter:490245", "quarter:400000", f"town:{BEROUN}", "ids:2+5+7"]
+    assert asked == [[2, 5]]
+    assert shadow.blocks_for(movers[:1], lambda ids: pytest.fail("asked")) == [
+        "quarter:490245", "quarter:400000"]
+
+
+def test_the_ids_block_is_exported_as_listed_and_its_ties_are_read_only(monkeypatch):
+    """`ids:` round-trips through the export's own parser and selection, and `tied_ads` reads
+    the pair and group verdicts and the property siblings in ONE read-only statement."""
+    from autodedup.cohort import ids_block, parse_blocks
+    from autodedup.export import fetch_block_ids
+
+    (block,) = parse_blocks(ids_block([9, 3, 3]))
+    assert (block.key, block.grain, block.code, block.ids) == ("ids", "ids", 2, (3, 9))
+    assert fetch_block_ids(None, block, timeout_ms=1, negctl_max=1) == ([3, 9], {})
+    conn = _Conn([(11,), (None,), (12,)])
+    assert shadow.tied_ads(conn, [5, 4, 5]) == [11, 12]
+    sql, params, in_transaction = conn.executed[0]
+    assert params == {"ids": [4, 5]} and in_transaction
+    assert all(table in sql for table in ("autodedup.verdicts", "autodedup.must_not_link",
+                                          "autodedup.operator_merges", "property_id"))
+    monkeypatch.setattr(shadow, "fetch_block_ids",
+                        lambda conn, block, **_: (list(block.ids) or [1, 2, 3], {}))
+    sizes = shadow.block_sizes(None, [f"town:{BEROUN}", ids_block([3, 9])])
+    assert sizes == {f"town:{BEROUN}": 3, "ids:3+9": 2}   # keyed by the block as written
 
 
 def test_the_export_step_calls_the_exporters_in_process_and_reads_the_live_scorer(
@@ -264,12 +293,13 @@ def test_a_limited_run_or_an_unjudged_mover_is_partial_and_still_judged():
 def test_a_mover_another_group_exports_is_not_unjudged(tmp_path: Path):
     movers = _jsonl(tmp_path / shadow.MOVERS_FILE, [
         {"listing_id": 1, "old": {"obec_kod": BEROUN}}, {"listing_id": 404, "old": {"obec_kod": 7}},
-        {"listing_id": 405, "old": None}])
+        {"listing_id": 405, "old": None}, {"listing_id": 406, "old": {"obec_kod": PRAHA}}])
     elsewhere = shadow.outside_group(movers, {"blocks": [f"town:{BEROUN}"]})
-    assert elsewhere == {404}
+    assert elsewhere == {404, 406}
+    assert shadow.outside_group(movers, {"blocks": ["ids:406"]}) == {1, 404}
     assert shadow.outside_group(movers, {}) == set()
-    verdict = _judge(_report(), changed={1}, listed={1, 404, 405}, elsewhere=elsewhere)
-    assert (verdict["movers_elsewhere"], verdict["movers_unjudged"]) == (1, 1)
+    verdict = _judge(_report(), changed={1}, listed={1, 404, 405, 406}, elsewhere=elsewhere)
+    assert (verdict["movers_elsewhere"], verdict["movers_unjudged"]) == (2, 1)
 
 
 def test_the_recent_same_pairs_are_counted_apart():

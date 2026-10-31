@@ -20,28 +20,25 @@ from location_data.resolver.bind import DeclaredPrecision
 from location_data.resolver.types import (
     DEFAULT_GRANULARITY_RANK,
     Binding,
-    GranularityRank,
+    Fill,
     Position,
+    Verdict,
 )
 from location_data.resolver.version import RESOLVER_VERSION
 from tests.location_data import mini_mirror as mm
-
-RANK = GranularityRank()
 
 NO_DECLARATION = DeclaredPrecision(label=None, blurred=False, claim_ids=())
 
 
 def _binding(**overrides) -> Binding:
-    values = {
-        "target_kind": "admin_unit", "granularity": "obec", "rung": "R4",
-        "agreed": ("obec",), "relaxations": (),
-    }
+    values = {"target_kind": "admin_unit", "rung": "R4", "agreed": ("obec",), "relaxations": ()}
     values.update(overrides)
     return Binding(**values)  # type: ignore[arg-type]
 
 
-def _graded(binding: Binding, position: Position | None = None, declared=NO_DECLARATION):
-    return grade.grade(binding, position or Position(None, None, "none"), declared=declared)
+def _confidence(binding: Binding, position: Position | None = None, declared=NO_DECLARATION):
+    return grade.confidence(binding, position or Position(None, None, "none"),
+                            blurred=declared.blurred)
 
 
 # ------------------------------------------------------------- agreement -> confidence
@@ -57,23 +54,21 @@ def _graded(binding: Binding, position: Position | None = None, declared=NO_DECL
     ],
 )
 def test_the_agreement_tally_is_the_confidence(agreed, expected):
-    assert _graded(_binding(agreed=agreed)).match_confidence == expected
+    assert _confidence(_binding(agreed=agreed)) == expected
 
 
 def test_an_address_point_whose_pin_corroborates_it_is_exact():
     position = Position(50.101, 14.348, "registry_point", registry_pin_distance_m=4.0)
-    binding = _binding(target_kind="address_point", granularity="address_point",
-                       agreed=("house_number", "street", "obec"))
-    assert _graded(binding, position).match_confidence == "exact"
+    binding = _binding(target_kind="address_point", agreed=("house_number", "street", "obec"))
+    assert _confidence(binding, position) == "exact"
 
 
 def test_a_pin_that_disagrees_with_the_registry_point_by_more_than_300_m_caps_at_medium():
     """`REGISTRY_PIN_CONFLICT_M`: the registry point stays the position and the confidence
     says the two sources are telling different stories. Flag, never silently pick."""
     position = Position(50.101, 14.348, "registry_point", registry_pin_distance_m=1_200.0)
-    binding = _binding(target_kind="address_point", granularity="address_point",
-                       agreed=("house_number", "street", "obec"))
-    assert _graded(binding, position).match_confidence == "medium"
+    binding = _binding(target_kind="address_point", agreed=("house_number", "street", "obec"))
+    assert _confidence(binding, position) == "medium"
 
 
 def test_a_tie_break_qualifier_caps_at_low_however_many_fields_agreed():
@@ -81,22 +76,22 @@ def test_a_tie_break_qualifier_caps_at_low_however_many_fields_agreed():
     but it may never read as a corroborated one."""
     for qualifier in ("coordinate_tiebreak_imprecise", "pip_nearest_within_n_m"):
         binding = _binding(agreed=("obec", "psc"), relaxations=(qualifier,))
-        assert _graded(binding).match_confidence == "low", qualifier
+        assert _confidence(binding) == "low", qualifier
 
 
 def test_an_ambiguous_bind_is_low_confidence_and_never_a_queue():
     """The contract flip of W2-a: `ambiguous` used to be a first-class status routed to an
     operator queue that does not exist."""
-    assert _graded(_binding(agreed=("obec", "psc"), ambiguous=True)).match_confidence == "low"
+    assert _confidence(_binding(agreed=("obec", "psc"), ambiguous=True)) == "low"
 
 
 def test_nothing_bound_is_low():
-    assert _graded(Binding("none", "unknown", "none")).match_confidence == "low"
+    assert _confidence(Binding("none", "none")) == "low"
 
 
 def test_a_blurred_declaration_caps_at_medium():
     declared = DeclaredPrecision(label="municipality", blurred=True, claim_ids=(9,))
-    assert _graded(_binding(agreed=("obec", "psc")), declared=declared).match_confidence == "medium"
+    assert _confidence(_binding(agreed=("obec", "psc")), declared=declared) == "medium"
 
 
 # --------------------------------------------------------------------- radius per level
@@ -144,18 +139,26 @@ def test_the_row_carries_the_radius_of_the_granularity_it_publishes():
 # it changed no answer on any input — a rail that reads as enforced and is not.
 
 
-@pytest.mark.parametrize(
-    "label, blurred",
-    [("municipality", True), ("no_exact_address", True), ("approximate", True),
-     ("fuzzy", True), ("gps", False)],
-)
-def test_a_declared_label_never_moves_the_granularity(label, blurred):
-    """Whatever the label says about the portal's coordinate, the grain is the BIND's."""
-    declared = DeclaredPrecision(label=label, blurred=blurred, claim_ids=(1,))
-    for rung, granularity in (("R7", "obec"), ("R1", "address_point"), ("R2", "street")):
-        binding = _binding(target_kind="address_point", granularity=granularity, rung=rung,
-                           agreed=("house_number", "street", "obec"))
-        assert _graded(binding, declared=declared).granularity == granularity, (label, rung)
+_CZ = Verdict("cz", "CZ")
+
+
+@pytest.mark.parametrize(("keys", "verdict", "grain"), [
+    ({"ruian_adm_kod": 1, "ulice_kod": 2, "cast_obce_kod": 3, "obec_kod": 4}, _CZ,
+     "address_point"),
+    ({"ulice_kod": 2, "cast_obce_kod": 3, "obec_kod": 4}, _CZ, "street"),
+    ({"cast_obce_kod": 3, "obec_kod": 4}, _CZ, "cast_obce_or_quarter"),
+    ({"obec_kod": 4, "okres_kod": 5}, _CZ, "obec"),
+    ({"okres_kod": 5, "kraj_kod": 6}, _CZ, "okres"),
+    ({"kraj_kod": 6}, _CZ, "kraj"),
+    ({}, _CZ, "unknown"),
+    ({}, Verdict("foreign", "AT"), "country"),
+    ({}, Verdict("foreign"), "unknown"),
+    ({"obec_kod": 4}, Verdict("undetermined"), "unknown"),
+])
+def test_the_grain_is_the_rows_finest_key(keys, verdict, grain):
+    """W5: ONE writer, off the keys FILL wrote. A declaration is no input at all, so no label
+    can move a grain, and CHECK writes none (its coarsening went with v5.10)."""
+    assert grade.grain_of(Fill(**keys), verdict) == grain
 
 
 def test_a_blurred_label_caps_the_confidence_and_that_is_its_whole_effect():
@@ -163,9 +166,9 @@ def test_a_blurred_label_caps_the_confidence_and_that_is_its_whole_effect():
     fuzzy is a weak witness, so the row is served at `medium`. That is the ONE thing a
     declaration decides."""
     binding = _binding(agreed=("obec", "psc"))
-    assert _graded(binding).match_confidence == "high"
+    assert _confidence(binding) == "high"
     blurred = DeclaredPrecision(label="approximate_location", blurred=True, claim_ids=(1,))
-    assert _graded(binding, declared=blurred).match_confidence == "medium"
+    assert _confidence(binding, declared=blurred) == "medium"
 
 
 # ------------------------------------------ W1-c: the labels the nine contracts emit
@@ -211,25 +214,6 @@ def test_a_w1c_declared_label_is_read_and_caps_the_confidence(
     # in the confidence alone.
     assert resolution.granularity == "address_point", who
     assert resolution.match_confidence == ("medium" if blurred else "exact"), who
-
-
-@pytest.mark.parametrize("origin", ["registry_point", "street_point", "portal_pin"])
-def test_a_declared_label_never_coarsens_a_grain_the_register_established(origin: str) -> None:
-    """The defect that killed the ladder, kept as a rail. Keying the cap on the elected
-    POSITION inverted the two labels that are capped but not blurred — idnes'
-    `no_exact_address` (66,165 listings) and sreality's `not_address` (13,176): a pin that
-    AGREED with the bound street stayed the position and was capped to `cast_obce_or_quarter`,
-    while a pin that CONTRADICTED it lost the position and graded `street`. The better-
-    evidenced row graded coarser."""
-    binding = _binding(target_kind="street", granularity="street", rung="R2",
-                       agreed=("street", "obec"))
-    for label in ("approximate_location", "no_exact_address", "not_address"):
-        blurred = label == "approximate_location"
-        declared = DeclaredPrecision(label=label, blurred=blurred, claim_ids=(1,))
-        graded = _graded(binding, Position(50.0, 14.0, origin, blurred=blurred),
-                         declared=declared)
-        assert graded.granularity == "street", label
-        assert graded.uncertainty_radius_m == grade.RADIUS_M["street"], label
 
 
 @pytest.mark.parametrize("label", ["no_exact_address", "not_address"])

@@ -1,7 +1,8 @@
 """`katastr_kod` — FILL's one KÚ rule (MF program PR-B, resolver v5.4).
 
 **The single KÚ of the BOUND registry entity, else NULL.** Every case below is one bound
-entity kind: an address point (its own KÚ), a KÚ or ZSJ unit (the KÚ on its chain), an obec
+entity kind: an address point (its own KÚ; one with no coordinates, its část's), a KÚ unit (the
+KÚ on its chain), an obec
 (its one KÚ child, else nothing), a street or část obce (the KÚ holding every one of its
 RÚIAN doors — operator Q7, 2026-09-25). What is NOT an entity is a portal pin: 66,165 idnes
 `no_exact_address` and 13,176 sreality `not_address` pins read as "precise"
@@ -38,8 +39,6 @@ def _mirror() -> mm.MiniMirror:
                  "k19.o3100.b554782", parent=13),
         mm._unit(41, "katastralni_uzemi", VELESLAVIN_KU, "Veleslavín", "veleslavin",
                  "k19.o3100.b554782", parent=13),
-        mm._unit(42, "zsj", 1234501, "Vokovice-střed", "vokovice stred",
-                 "k19.o3100.b554782", parent=40),
         mm._unit(43, "cast_obce", 490211, "Veleslavín", "veleslavin",
                  "k19.o3100.b554782.c490211", parent=13),
         mm._unit(44, "cast_obce", 490999, "Prázdná", "prazdna",
@@ -88,14 +87,23 @@ def test_a_portal_registry_key_binds_the_same_ku():
     assert resolution.katastr_kod == VOKOVICE_KU
 
 
-@pytest.mark.parametrize(("unit_id", "expected"), [(40, VOKOVICE_KU), (42, VOKOVICE_KU)])
-def test_a_bound_ku_is_itself_and_a_zsj_is_the_ku_it_lies_in(unit_id, expected):
-    """BIND does not bind a KÚ by name today; FILL's rule is written for the entity, so a KÚ
-    unit (or a ZSJ, a child of exactly one KÚ) answers off its own chain."""
-    binding = Binding(target_kind="admin_unit", granularity="cast_obce_or_quarter", rung="R4",
-                      admin_unit_id=unit_id, obec_kod=554782)
+def test_a_bound_ku_is_itself():
+    """BIND binds no KÚ by name (a KÚ claim binds the část it spells, W5); FILL's rule is
+    written for the entity, so a KÚ unit answers off its own chain."""
+    binding = Binding(target_kind="admin_unit", rung="R4", admin_unit_id=40, obec_kod=554782)
     filled = step_fill.fill(binding, step_bind.Constraints(), _mirror())
-    assert filled.katastr_kod == expected
+    assert filled.katastr_kod == VOKOVICE_KU
+
+
+def test_an_address_point_without_coordinates_takes_its_parts_ku():
+    """W5: a point with no coordinates has no KÚ of its own (19405830), so its část's door
+    rule answers — Vokovice's every door lies in the Vokovice KÚ."""
+    mirror = _mirror()
+    mirror.points.append(AddressPoint(kod_adm=21690400, obec_unit_id=13, obec_kod=554782,
+                                      psc="16000", lat=None, lon=None, cislo_domovni=600,
+                                      cast_obce_unit_id=14, cast_obce_kod=490067))
+    resolution = _resolve([mm.claim(1, "address_point_id", value_text="21690400")], mirror)
+    assert (resolution.granularity, resolution.katastr_kod) == ("address_point", VOKOVICE_KU)
 
 
 def test_a_one_ku_obec_is_in_that_ku():
@@ -240,10 +248,10 @@ def test_the_part_question_is_asked_only_for_a_part_bind():
 def test_the_katastr_rule_carries_its_own_resolver_version():
     """A rule that changes an output moves `RESOLVER_VERSION`, or the sweep never re-queues
     the corpus and no existing row ever gets its KÚ (v5.4) — nor the W2 town rule (v5.5), nor
-    W4's parts and streets (v5.7), nor a část placed at its own doors (v5.8), nor a declared
-    blurred pin outside its town yielding the position to the words (v5.9), nor one claim per
-    type read with no tie rule (v5.9.1, W3)."""
-    assert RESOLVER_VERSION == "resolver:v5.9.1"
+    W4's parts and streets (v5.7), nor a část placed at its own doors (v5.8), nor one claim per
+    type read with no tie rule (v5.9.1, W3), nor a pin placing a row only inside the town the
+    words bound, the quarter a část and the grain the finest key (v5.10, W5)."""
+    assert RESOLVER_VERSION == "resolver:v5.10"
 
 
 # ------------------------------------------------------------------ the SQL side

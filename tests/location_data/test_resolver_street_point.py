@@ -145,14 +145,13 @@ def test_a_blurred_pin_loses_to_the_street_the_ad_names():
     assert resolution.match_confidence == "medium"
 
 
-def test_the_same_row_without_a_street_is_unchanged_by_w18():
-    """The control, and the other half of the rule: with nothing bound below the town the
-    pin IS the position, so bazos' declared cap applies exactly as it always has — obec, one
-    kilometre, the ad's own approximate pin."""
+def test_the_same_row_without_a_street_stands_at_its_town():
+    """The control: with nothing bound below the town, bazos' AREA marker is still no position
+    for a row the words bound (v5.10) — obec, the town's own point, the town's radius."""
     resolution = _resolve(_bazos(street=None, pin=BLURRED_PIN, label="approximate_location"))
     assert resolution.granularity == "obec"
     assert resolution.uncertainty_radius_m == step_grade.RADIUS_M["obec"]
-    assert (resolution.lat, resolution.lon) == BLURRED_PIN
+    assert (resolution.lat, resolution.lon) == (50.4114, 14.9030)
     assert resolution.street_name is None and resolution.ulice_kod is None
 
 
@@ -241,10 +240,9 @@ def test_a_hallucinated_street_binds_to_nothing_and_is_not_published():
 
 
 def test_an_unbound_street_never_moves_the_pin_either():
-    """The two rules are one rule: a street that is not published cannot place a row. The
-    blurred pin stays the position — there is nothing better to put there."""
-    resolution = _resolve(_bazos(street="ul. Neexistující", pin=BLURRED_PIN,
-                                 label="approximate_location"))
+    """The two rules are one rule: a street that is not published cannot place a row. A pin
+    inside the town stays the position — there is nothing better to put there."""
+    resolution = _resolve(_bazos(street="ul. Neexistující", pin=BLURRED_PIN))
     assert resolution.street_name is None
     assert (resolution.lat, resolution.lon) == BLURRED_PIN
 

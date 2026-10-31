@@ -56,24 +56,40 @@ def test_a_two_part_town_binds_whole_and_is_never_split(registry):
     assert (found.obec.name, found.part, found.reason) == ("Frýdek-Místek", None, "whole_string")
 
 
-def test_a_city_prefixed_momc_binds_whole_and_resolves_up(registry):
-    """"Praha-Řeporyje" is the official name of a městská část. It is matched as itself and
-    the TOWN comes off its parent — "resolve up to the town name", and the reason the
-    reader no longer has to know which of Prague's 57 quarters are spelled this way."""
-    found = resolve_locality("Praha-Řeporyje", registry)
-    assert found.obec.name == "Praha"
-    assert (found.part.name, found.part.level) == ("Praha-Řeporyje", "momc")
-    assert found.reason == "whole_string"
+@pytest.mark.parametrize(("line", "town"), [
+    ("Praha-Řeporyje", "Praha"), ("Praha 4", "Praha"), ("Pardubice II", "Pardubice"),
+    ("Plzeň 3", "Plzeň"), ("Brno-střed", "Brno")])
+def test_a_momc_line_binds_whole_and_anchors_its_town_only(registry, line, town):
+    """"Praha-Řeporyje", "Praha 4" and "Pardubice II" are what RÚIAN calls those městské části,
+    so they match as themselves and the TOWN comes off the parent — and that is all they bind:
+    a MOMC is a match key, never the quarter (W5, ruling Q1), its borders cross the části."""
+    found = resolve_locality(line, registry)
+    assert (found.obec.name, found.part, found.reason) == (town, None, "whole_string")
 
 
-def test_a_bare_numbered_obvod_binds_whole_because_the_number_is_its_name(registry):
-    """"Praha 4" and "Pardubice II" are what RÚIAN calls those units. The old regex stripped
-    the number to reach the city; matching it keeps the quarter as well as the town."""
-    for line, town, quarter in (("Praha 4", "Praha", "Praha 4"),
-                                ("Pardubice II", "Pardubice", "Pardubice II"),
-                                ("Plzeň 3", "Plzeň", "Plzeň 3")):
-        found = resolve_locality(line, registry)
-        assert (found.obec.name, found.part.name) == (town, quarter), line
+def test_a_momc_anchors_the_town_and_the_claimed_part_binds_without_a_tie(registry):
+    """remax writes its town "Praha N" (1,607 active ads) and its part beside it. The MOMC
+    anchors Praha; the claimed Podolí is the one candidate below it, so the row no longer ties
+    a MOMC against a část at R4 and grades `low` (W5)."""
+    row = _resolve([mm.claim(1, "obec_name", value_text="Praha 4"),
+                    mm.claim(2, "cast_obce_name", value_text="Podolí")], registry)
+    assert (row.obec_kod, row.cast_obce_kod, row.granularity) == (
+        554782, 400190, "cast_obce_or_quarter")
+    assert row.match_confidence == "high"
+    alone = _resolve([mm.claim(1, "obec_name", value_text="Praha 4")], registry)
+    assert (alone.obec_kod, alone.cast_obce_kod, alone.granularity) == (554782, None, "obec")
+
+
+def test_a_street_spelled_like_a_momc_is_no_street_and_names_no_part(registry):
+    """Trap 2 of W5: a line naming a MOMC of the town is still a place, so R3 never reads it
+    (it would fuzzy-match the very street), and the MOMC is no part."""
+    registry.streets.append(Street(code=201, name="Brno-střed", name_norm="brno stred",
+                                   obec_kod=582786))
+    line = resolve_street("Brno-střed", (582786,), registry)
+    assert (line.street, line.named_part, line.reason) == (None, None, "street_names_part")
+    row = _resolve([mm.claim(1, "obec_name", value_text="Brno"),
+                    mm.claim(2, "street_name", value_text="Brno-střed")], registry)
+    assert (row.obec_kod, row.ulice_kod, row.cast_obce_kod) == (582786, None, None)
 
 
 def test_an_okres_spelled_like_an_obvod_is_refused_before_anything_is_split(registry):
@@ -94,8 +110,8 @@ def test_an_okres_spelled_like_an_obvod_is_refused_before_anything_is_split(regi
     ("Plzeň - Jižní Předměstí", "Plzeň", "Jižní Předměstí"),
     ("Brno - Dolní Heršpice", "Brno", "Dolní Heršpice"),
     ("Ostrava - Poruba", "Ostrava", "Poruba"),
-    ("Liberec - Vratislavice nad Nisou", "Liberec", "Liberec-Vratislavice nad Nisou"),
-    ("Ústí nad Labem - Střekov", "Ústí nad Labem", "Ústí nad Labem-Střekov"),
+    ("Liberec - Vratislavice nad Nisou", "Liberec", None),
+    ("Ústí nad Labem - Střekov", "Ústí nad Labem", None),
     ("Pardubice - Polabiny", "Pardubice", "Polabiny"),
     ("Opava - Kateřinky", "Opava", "Kateřinky"),
     # The unspaced spelling and the en dash are the same line.
@@ -104,12 +120,12 @@ def test_an_okres_spelled_like_an_obvod_is_refused_before_anything_is_split(regi
 ])
 def test_the_eight_statutory_cities_bind_town_and_quarter_from_one_line(
         registry, line, town, quarter):
-    """One rule for all eight, which is what the ruling asked for. Two of them come back with
-    the city-prefixed MOMC as the quarter because that is the name the register gives the
-    unit that matched whole — the answer is the register's spelling, never the portal's."""
+    """One rule for all eight, which is what the ruling asked for. Two of them match whole as
+    the city-prefixed MOMC the register names, which anchors the town and binds no part (W5);
+    every answer is the register's spelling, never the portal's."""
     found = resolve_locality(line, registry)
     assert found.bound, found.reason
-    assert (found.obec.name, found.part.name) == (town, quarter)
+    assert (found.obec.name, getattr(found.part, "name", None)) == (town, quarter)
 
 
 def test_the_quarter_is_searched_inside_the_anchoring_town_only(registry):
@@ -201,7 +217,7 @@ def test_the_bind_is_stamped_as_a_composite_for_the_diagnostics(registry):
     carries `composite_locality`, which is not one of the low-confidence qualifiers and so
     ranks and grades exactly like a named obec."""
     binding = _bind([mm.claim(1, "obec_name", value_text="Opava, Nákladní 14")], registry)
-    assert binding.granularity == "obec"
+    assert binding.target_kind == "admin_unit"
     assert "composite_locality" in binding.relaxations
     assert binding.rung == "R4"
 

@@ -1250,8 +1250,8 @@ component is slimmed twice — each wave rewrites one component and slims its st
   live as the dispatch-only `location_wave_shadow.yml` (no cron, off the job runner, like
   `backup_before_drop.yml`). First use: W4 (PR #2220), then W3. With W3 (#2223) `what_if.restate` is
   deleted (a re-mine replaces each mined key, a tombstone removes it, under the one read) and
-  `what_if --claims purge` reads every claim of its ids raw and applies the purge's keeper rule. Owed before W5's shadow: an id-grain export block for movers that sit in no
-  block today (Praha rows gaining a quarter).
+  `what_if --claims purge` reads every claim of its ids raw and applies the purge's keeper rule. W5 built
+  the id-grain export block (`ids`) for the movers that sit in no block today.
 - **Owed — one copy the subtraction mandate still carries** (rules-wording audit, 2026-10-01; rule 25
   now reads as practised: a net-positive location PR says why in its body, and the operator rules on
   it). `claims_intake.extract_listing` keeps a sreality-only branch, the `sreality_payload_shape:`
@@ -1290,6 +1290,18 @@ component is slimmed twice — each wave rewrites one component and slims its st
   retract or an activation is followed by one full re-mine of that source (R4). Acceptance: 0 duplicate
   keys, ≈ 5.98 M rows, the ≈ 250 wrongly blurred sreality/mmreality rows read precise, multi-pin ads serve
   the current pin. Design: `docs/design/location-quality/w3-one-claim-per-fact.md`.
+- **W5 — resolver v5.10 — built 2026-10-31** (#2251; no migration; `resolver:v5.10`; merges after W3).
+  One truth (ruling Q3): where the words bound the row a pin is its position only inside the bound obec's
+  pip polygon (no tolerance) and never when the portal declares an area marker (bazos
+  `approximate_location`); without words (R7/R8) the pin names its town. v5.9's declared-blurred exception
+  and CHECK's coarsening go; the grain is the row's finest key (`grade.grain_of`, the one writer). Quarter =
+  část obce only (Q1): MOMC is a match key (`MATCH_LEVELS`, `composite.part_of`), SO and ZSJ no level; a
+  part claim matches like a town name and a street keeps the claimed část where it has doors (Q2); an
+  address point with no coordinates takes its část's KÚ. The wave shadow gains the `ids` export block.
+  Measured 2026-10-31 16Z: 1,353 pins outside their town and 23,297 bazos postal pins move to the bound
+  entity's point at its reach; 2,834 MOMC codes and 200 SO ties re-bind; grain ≠ finest key 736 → 0.
+  Rollout: shadow PASS on every slice, merge, W2's reconcile sweeps. Design:
+  `docs/design/location-quality/w5-resolver-v5-10.md`.
 
 - **W1 — one location scorecard — built 2026-10-31** (#2218; migration 698; location data quality
   programme, rulings Q3/Q6/Q7). `location_quality_by_source` defines every location quality number

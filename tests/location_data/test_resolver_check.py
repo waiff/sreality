@@ -160,56 +160,50 @@ def test_a_clean_row_is_not_disputed():
     assert resolution.disputed is None
 
 
-def test_a_pin_outside_the_resolved_obec_keeps_the_pin_and_drops_to_the_admin_level():
-    """The pin says Bílovec, the name says Praha. Both are kept — the pin because it is the
-    only position there is, the town because the name is the stronger claim — and the row
-    says so in one word.
-
-    NO street here, deliberately. W18 gave a bound street a point of its own, and a row that
-    has one no longer has "the pin because it is the only position there is" — it takes the
-    register's point and disputes `pin_off_street` instead (the test below). This rail is
-    about the rows that still have nothing else. No PSČ and an undeclared pin (v5.5): the town
-    rule keeps the name — 56 realitymix pins sit on the centre of Czechia — and this flags it.
-
-    UNDECLARED pin, deliberately: since v5.9 a pin the portal itself calls approximate yields
-    the position to the words (the tests below); a pin nobody called approximate is kept, as
-    which half is wrong there is not ruled."""
+@pytest.mark.parametrize("label", [None, "gps"])
+def test_a_pin_outside_the_named_town_yields_the_position_to_the_words(label):
+    """The pin says Kladno, the name says Praha (v5.10, ruling Q3: one truth). The words bound
+    the town, so a pin outside it is never the position, whatever its label: FILL stands the row
+    at Praha's own point, the grain is the bind's, and the pin stays EVIDENCE — the row says so
+    in one word. sreality declares `gps` on 209 such active rows; it moves like an undeclared
+    one. Kladno is inside the 40 km reach a precise pin imposes on the town rule (v5.5)."""
     resolution = _resolve([
         mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "coordinate", lat=49.7573, lon=18.0158),
+        mm.claim(2, "coordinate", lat=50.1477, lon=14.1028, declared_precision_label=label),
     ])
-    assert resolution.disputed == "pin_outside_obec"
-    assert resolution.obec_kod == 554782
-    assert (resolution.lat, resolution.lon) == (49.7573, 18.0158)
+    assert (resolution.obec_kod, resolution.disputed) == (554782, "pin_outside_obec")
+    assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)   # Praha's own point
     assert resolution.granularity == "obec"
 
-
-# ------------------------------------------------ v5.9: the words decide (ruling 2026-10-30)
 
 _APPROXIMATE = {"value_text": "approximate_location",
                 "declared_precision_label": "approximate_location", "blur_evidence": "declared"}
 
 
-def test_a_declared_blurred_pin_outside_the_named_town_yields_the_position_to_the_words():
-    """Operator ruling 2026-10-30 ("the words"). bazos stamps every pin "Přibližná lokalita"
-    and places it on a POSTAL-AREA point: one Kolín pin carried 143 active ads from 34 obce,
-    and listing 19509113 said Jestřabí Lhota while its row drew Kolín, 8.8 km off at r = 1 km
-    — 12,543 active bazos rows in that state. A pin the portal itself calls approximate, in a
-    town the ad does not name, is the half that yields: FILL stands the row at the town's own
-    point, the pin stays EVIDENCE (CHECK still says `pin_outside_obec`), the grain is the
-    bind's and the blurred pin caps the confidence at `medium`, exactly as before."""
-    claims = [
-        mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
-        mm.claim(2, "psc", source="bazos", value_text="16000"),
-        mm.claim(3, "coordinate", source="bazos", lat=49.7573, lon=18.0158),
-        mm.claim(4, "precision_declaration", source="bazos", **_APPROXIMATE),
-    ]
+@pytest.mark.parametrize(("part", "pin", "disputed"), [
+    (None, (49.7573, 18.0158), "pin_outside_obec"), ("Vokovice", (49.7573, 18.0158),
+                                                     "pin_outside_obec"),
+    (None, (50.0900, 14.4500), None), ("Vokovice", (50.0900, 14.4500), None)])
+def test_an_area_marker_never_places_a_row_the_words_bound(part, pin, disputed):
+    """bazos stamps every pin "Přibližná lokalita" on a POSTAL-AREA point (one Kolín pin carried
+    143 active ads from 34 obce): inside the town or out, it is no position where the words
+    bound the row (v5.10). FILL stands it at the named entity — the town's point, or a bound
+    část's doors (v5.8) — the grain is the bind's, the blurred pin caps the confidence at
+    `medium`, and the flag records a pin outside the town only."""
+    claims = [mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
+              mm.claim(3, "coordinate", source="bazos", lat=pin[0], lon=pin[1]),
+              mm.claim(4, "precision_declaration", source="bazos", **_APPROXIMATE)]
+    if part:
+        claims.append(mm.claim(2, "cast_obce_name", source="bazos", value_text=part))
     resolution = _resolve(claims)
-    assert resolution.disputed == "pin_outside_obec"
-    assert resolution.obec_kod == 554782
-    assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)   # Praha's own point
-    assert resolution.granularity == "obec"
-    assert resolution.match_confidence == "medium"
+    assert (resolution.disputed, resolution.match_confidence) == (disputed, "medium")
+    assert (resolution.obec_kod, resolution.cast_obce_kod) == (554782, 490067 if part else None)
+    if part:
+        assert resolution.granularity == "cast_obce_or_quarter"
+        assert 50.1010 < resolution.lat < 50.1012 and 14.3480 < resolution.lon < 14.3482
+        assert resolution.uncertainty_radius_m == 750.0
+        return
+    assert (resolution.granularity, resolution.lat, resolution.lon) == ("obec", 50.0755, 14.4378)
     assert resolution.uncertainty_radius_m == 1000.0
     # v5.8's floor applies to this placement as to every FILL placement: the town's reach,
     # not the level constant, is the radius a reader sees.
@@ -219,58 +213,11 @@ def test_a_declared_blurred_pin_outside_the_named_town_yields_the_position_to_th
     assert _resolve(claims, mirror).uncertainty_radius_m == 17_600.0
 
 
-def test_a_declared_blurred_pin_outside_the_town_bound_to_a_part_stands_at_the_parts_doors():
-    """The words name the quarter too: the row stands where v5.8 puts a pinless část — the
-    centroid of its own doors — at the quarter grain, and the flag still records the pin."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
-        mm.claim(2, "cast_obce_name", source="bazos", value_text="Vokovice"),
-        mm.claim(3, "coordinate", source="bazos", lat=49.7573, lon=18.0158),
-        mm.claim(4, "precision_declaration", source="bazos", **_APPROXIMATE),
-    ])
-    assert resolution.disputed == "pin_outside_obec"
-    assert (resolution.obec_kod, resolution.cast_obce_kod) == (554782, 490067)
-    assert resolution.granularity == "cast_obce_or_quarter"
-    assert 50.1010 < resolution.lat < 50.1012 and 14.3480 < resolution.lon < 14.3482
-    assert resolution.uncertainty_radius_m == 750.0
-
-
-def test_a_declared_blurred_pin_inside_the_named_town_stays_the_position():
-    """Nothing moves where nothing disagrees: a blurred pin inside the town it names is the
-    finer of two true answers and keeps the position, at the obec grain and `medium`."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
-        mm.claim(2, "coordinate", source="bazos", lat=50.0900, lon=14.4500),
-        mm.claim(3, "precision_declaration", source="bazos", **_APPROXIMATE),
-    ])
-    assert resolution.disputed is None
-    assert (resolution.lat, resolution.lon) == (50.0900, 14.4500)
-    assert resolution.granularity == "obec"
-    assert resolution.match_confidence == "medium"
-
-
-def test_a_declared_precise_pin_outside_the_named_town_is_kept_like_an_undeclared_one():
-    """sreality declares `gps` on 188 such active rows: the portal vouches for the coordinate
-    and the words name another town. Which half is wrong is not ruled, so the pin stays the
-    position at the obec grain, flagged, exactly as an undeclared pin does. The pin sits in
-    Kladno, 25 km from Praha — inside the 40 km reach a precise pin imposes on the town rule
-    (v5.5), so the name still binds; a precise pin 300 km away would drop the name instead and
-    the pin's own town would bind on R7, undisputed."""
-    resolution = _resolve([
-        mm.claim(1, "obec_name", value_text="Praha"),
-        mm.claim(2, "coordinate", lat=50.1477, lon=14.1028, declared_precision_label="gps"),
-    ])
-    assert resolution.obec_kod == 554782
-    assert resolution.disputed == "pin_outside_obec"
-    assert (resolution.lat, resolution.lon) == (50.1477, 14.1028)
-    assert resolution.granularity == "obec"
-
-
 def test_a_street_the_register_cannot_place_falls_through_to_the_same_rule():
     """`28. října` is a Praha street with no address point in the mirror, so the street rung
-    has no point of its own and the ladder reaches the pin — where a declared-blurred pin
-    outside Praha is set aside and FILL walks the chain to the town's point. The grain is the
-    bind's (street); the radius is the level's, floored by the unit's reach where it has one."""
+    has no point of its own and the ladder reaches the pin — which, outside Praha, places
+    nothing, so FILL walks the chain to the town's point. The grain is the row's finest key
+    (street); the radius is the level's, floored by the unit's reach where it has one."""
     resolution = _resolve([
         mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
         mm.claim(2, "street_name", source="bazos", value_text="28. října"),
@@ -283,23 +230,27 @@ def test_a_street_the_register_cannot_place_falls_through_to_the_same_rule():
     assert resolution.granularity == "street"
 
 
-def test_a_part_with_no_doors_stands_at_its_towns_point_at_the_quarter_grain():
-    """A městský obvod (or a část with no door) has no point of its own, so the set-aside row
-    takes the town's point — coarser than the grain says, and the radius says so once the unit
-    carries a reach (v5.8). The 13 MOMC rows among the moved bazos ads are this case."""
+def test_a_part_with_no_doors_stands_at_its_towns_point_and_a_momc_is_no_part():
+    """A část with no door has no point of its own, so the row takes the town's point at the
+    quarter grain — coarser than the grain says, and the radius says so once the unit carries
+    a reach (v5.8). A claimed MOMC is a key, never the quarter (W5, ruling Q1): obec grain."""
     mirror = mm.default_mirror()
-    mirror.units.append(mm._unit(99, "momc", 500178, "Praha 6", "praha 6",
-                                 "k19.o3100.b554782.m500178", parent=13))
-    resolution = _resolve([
-        mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
-        mm.claim(2, "cast_obce_name", source="bazos", value_text="Praha 6"),
-        mm.claim(3, "coordinate", source="bazos", lat=49.7573, lon=18.0158),
-        mm.claim(4, "precision_declaration", source="bazos", **_APPROXIMATE),
-    ], mirror)
-    assert (resolution.obec_kod, resolution.cast_obce_kod) == (554782, 500178)
-    assert resolution.granularity == "cast_obce_or_quarter"
-    assert (resolution.lat, resolution.lon) == (50.0755, 14.4378)
-    assert resolution.disputed == "pin_outside_obec"
+    mirror.units += [mm._unit(98, "cast_obce", 490999, "Prázdná", "prazdna",
+                              "k19.o3100.b554782.c490999", parent=13),
+                     mm._unit(99, "momc", 500178, "Praha 6", "praha 6",
+                              "k19.o3100.b554782.m500178", parent=13)]
+    for part, kod, grain in (("Prázdná", 490999, "cast_obce_or_quarter"),
+                             ("Praha 6", None, "obec")):
+        resolution = _resolve([
+            mm.claim(1, "obec_name", source="bazos", value_text="Praha"),
+            mm.claim(2, "cast_obce_name", source="bazos", value_text=part),
+            mm.claim(3, "coordinate", source="bazos", lat=49.7573, lon=18.0158),
+            mm.claim(4, "precision_declaration", source="bazos", **_APPROXIMATE),
+        ], mirror)
+        assert (resolution.obec_kod, resolution.cast_obce_kod) == (554782, kod)
+        assert (resolution.granularity, resolution.lat, resolution.lon) == (
+            grain, 50.0755, 14.4378)
+        assert resolution.disputed == "pin_outside_obec"
 
 
 def test_a_town_the_pin_itself_established_never_yields_its_own_pin():

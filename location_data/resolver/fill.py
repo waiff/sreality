@@ -13,19 +13,14 @@ W2-a the quarter was filled only on the point-in-polygon branch (`cast_obce_for_
 — 2026-09-11 audit, resolver-v4. Filling it off the bound entity fixes that by construction
 and deletes the query.
 
-FILL also places the row when BIND's pin election did not (W2-a3): **the portal pin when one
-was admissible, else the finest bound entity's own registry point** — a část obce's at the
-centroid of its own doors (v5.8), since RÚIAN draws it no polygon. Since v5.9 it also places a
-row whose elected pin is DECLARED blurred and lies outside the bound obec: `bind.place` sets
-that pin aside (operator ruling 2026-10-30, "the words decide"). 29 % of towned rows
-(8,706 of 29,892, measured 2026-09-12 08:05Z) carried `geom NULL` because the only position
-the resolver published was a pin, and a listing bound by NAME has none — so a row that knows
-its town would have vanished from W3's map, which re-sources lat/lng from `listing_location`
-with no fallback. The point is the registry's, so the granularity, the confidence and the
-radius are all unchanged: the LEVEL is what tells a reader how coarse the position is, and
-FILL's point never causes a dispute — a town centre is not a disagreement with anything (a row
-FILL places because a declared-blurred pin was set aside, v5.9, still carries that pin's
-`pin_outside_obec`).
+FILL also places the row when `bind.place` did not (W2-a3) — no pin, or a pin outside the town
+the words bound or declared an area marker (v5.10, ruling Q3): **the finest bound entity's own
+registry point**, a část obce's at the centroid of its own doors (v5.8), since RÚIAN draws it no
+polygon. 29 % of towned rows (8,706 of 29,892, measured 2026-09-12 08:05Z) carried `geom NULL`
+because the only position the resolver published was a pin, and a listing bound by NAME has none
+— so a row that knows its town would have vanished from W3's map, which re-sources lat/lng from
+`listing_location` with no fallback. FILL's point never causes a dispute — a town centre is not a
+disagreement with anything (a row whose pin was set aside still carries `pin_outside_obec`).
 Since v5.8 the radius is never smaller than the placed-on entity's own reach (the část's
 farthest door, the polygon's `containment_radius_m`): a row on Praha's point said 1 km and
 could be 17.6 km off.
@@ -38,10 +33,10 @@ An OPERATOR correction is no exception since W3: it outranks the portal's claim 
 binds through the register like any claim.
 
 `katastr_kod` (PR-B, v5.4) is ONE rule under the same contract: **the single KÚ of the BOUND
-registry entity, else NULL** — a KÚ (or a ZSJ inside one) on the bound unit's chain; the one
-KÚ of a one-KÚ obec, which every entity inside it lies in; an address point's own KÚ; a street
-or část obce whose every RÚIAN door lies in one KÚ (the Q7 door rule). A portal pin never
-decides it, whatever the portal labels it: the labels a contract does not list as blurred read
+registry entity, else NULL** — a KÚ on the bound unit's chain; the one KÚ of a one-KÚ obec,
+which every entity inside it lies in; an address point's own KÚ (one with no coordinates has
+none: its část's, W5); a street or část obce whose every RÚIAN door lies in one KÚ (the Q7 door
+rule). A portal pin never decides it, whatever the portal labels it: the labels a contract does not list as blurred read
 as "precise" (`core.pin_is_precise`; idnes `no_exact_address` and sreality `not_address` ARE
 blur-declared by their contracts since W1-c), so a pin-based KÚ would be a guess. Nothing else is NULL-masked specially: a foreign row loses it with every other code in
 `core`, and a disputed row keeps its bound entity's.
@@ -65,9 +60,6 @@ _LEVEL_FIELDS = {
     "okres": ("okres_kod", "okres_name"),
     "obec": ("obec_kod", "obec_name"),
     "cast_obce": ("cast_obce_kod", "cast_obce_name"),
-    # A Prague/Brno městský obvod is the quarter for serving purposes when no ČástObce
-    # sits on the chain; it never overwrites one that does.
-    "momc": ("cast_obce_kod", "cast_obce_name"),
 }
 
 # The two chain levels no listing may be placed at. Nothing binds them — they are the tail
@@ -132,8 +124,7 @@ def fill(
 
 
 def position(filled: Fill, binding: Binding) -> Position:
-    """The position FILL publishes when BIND's pin election came back empty (W2-a3), or when
-    `bind.place` set a declared-blurred pin outside the bound town aside (v5.9).
+    """The position FILL publishes when `bind.place` placed nothing (W2-a3, v5.10).
 
     It is a REGISTRY point, so nothing about it can contradict the row: CHECK's containment
     tests are asked of a portal pin only, because a point that came out of the mirror is
@@ -183,11 +174,11 @@ def _katastr_kod(
     obec = next((unit for unit in chain if unit.level == "obec"), None)
     if obec is not None and obec.sole_katastr_kod is not None:
         return obec.sole_katastr_kod
-    if point is not None:
+    if point is not None and point.katastr_kod is not None:
         return point.katastr_kod
     if binding.target_kind == "street":
         return binding.street_katastr_kod
-    if binding.target_kind == "admin_unit" and chain and chain[0].level == "cast_obce":
+    if chain and chain[0].level == "cast_obce":
         part = registry.part_point(chain[0].unit_id)
         return None if part is None else part.katastr_kod
     return None
@@ -200,11 +191,9 @@ def _registry_point(
     a bound část obce's own doors, else the first unit on the chain carrying one.
 
     "Has one" is the whole subtlety, and it is why this walks instead of reading `chain[0]`.
-    RÚIAN draws no polygon for a část obce or a městský obvod, so the two levels a Czech
-    listing most often names by hand are exactly the two with no point of their own. A část
-    takes the centroid of its doors (v5.8), as a bound street does in BIND; a městský obvod,
-    or a část with no door, takes its TOWN's point — coarser than the granularity says, and
-    the radius then says so, since the reach is the polygon's.
+    RÚIAN draws no polygon for a část obce, so a část takes the centroid of its doors (v5.8), as
+    a bound street does in BIND; a část with no door takes its TOWN's point — coarser than the
+    granularity says, and the radius then says so, since the reach is the polygon's.
     """
     if point is not None and point.lat is not None and point.lon is not None:
         return point.lat, point.lon, None

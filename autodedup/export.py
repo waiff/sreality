@@ -538,6 +538,8 @@ def fetch_block_ids(
     conn: Any, block: Block, *, timeout_ms: int, negctl_max: int
 ) -> tuple[list[int], dict[str, Any]]:
     """The listing ids of one block, plus whatever detail the block's rule produced."""
+    if block.grain == "ids":
+        return list(block.ids), {}
     if block.grain == "town":
         rows = _run(conn, COHORT_TOWN_IDS_SQL, {"code": block.code}, timeout_ms)
         return [int(r["listing_id"]) for r in rows], {}

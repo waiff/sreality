@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
-GRAINS: tuple[str, ...] = ("town", "quarter", "assembled")
+GRAINS: tuple[str, ...] = ("town", "quarter", "assembled", "ids")
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,8 @@ class Block:
     grain: str
     code: int
     label: str
+    # An `ids` block's listings, exported as listed (the wave shadow's id grain); code = count.
+    ids: tuple[int, ...] = ()
 
     def as_meta(self) -> dict[str, Any]:
         return {"key": self.key, "grain": self.grain, "code": self.code, "label": self.label}
@@ -76,7 +78,7 @@ def parse_blocks(raw: str | None) -> tuple[Block, ...]:
 
     A bare block key (`negctl`, `jablonec`) selects a ruled block; `grain:code` builds an ad
     hoc one whose key and label are derived, so an override never silently reuses a ruled
-    block's label for a different code.
+    block's label for a different code; `ids:<id>+<id>…` lists its ads (`ids_block`).
     """
     text = (raw or "").strip()
     if not text:
@@ -90,10 +92,13 @@ def parse_blocks(raw: str | None) -> tuple[Block, ...]:
             if grain not in GRAINS:
                 raise ValueError(f"unknown grain {grain!r}; known: {', '.join(GRAINS)}")
             try:
-                code = int(code_text)
+                ids = (tuple(sorted({int(i) for i in code_text.split("+")}))
+                       if grain == "ids" else ())
+                code = len(ids) or int(code_text)
             except (TypeError, ValueError):
                 raise ValueError(f"block {token!r}: code must be an integer") from None
-            block = Block(f"{grain}{code}", grain, code, f"{grain} {code}")
+            key = "ids" if ids else f"{grain}{code}"
+            block = Block(key, grain, code, f"{grain} {code}", ids)
         else:
             block = block_by_key(token)
         if block.key in seen:
@@ -101,6 +106,12 @@ def parse_blocks(raw: str | None) -> tuple[Block, ...]:
         seen.add(block.key)
         out.append(block)
     return tuple(out)
+
+
+def ids_block(ids: Iterable[int]) -> str:
+    """The `ids` block's token: its listing ids joined by `+` (whitespace and commas separate
+    blocks), as `parse_blocks` reads it back."""
+    return "ids:" + "+".join(str(i) for i in sorted({int(i) for i in ids}))
 
 
 def select_negative_control(

@@ -1,5 +1,8 @@
 """GRADE — step 3 of 4: one granularity, one confidence, one radius.
 
+**The grain is the row's FINEST KEY** (`grain_of`, W5): one writer, read off what FILL wrote;
+CHECK writes none and a portal's declared precision reaches the confidence, never the grain.
+
 The whole step is two tables and twenty lines of rule, which is the point of W2-a: before
 it, this was `precision.py` (four orthogonal axes, a declared-cap ladder, a collision cap
 read from a stamped epoch, a `position_quality_class`) plus `uncertainty.py` (184 lines
@@ -16,12 +19,8 @@ dedup key ask about the ADDRESS.
 
 from __future__ import annotations
 
-from location_data.resolver.bind import (
-    LOW_CONFIDENCE_QUALIFIERS,
-    REGISTRY_PIN_CONFLICT_M,
-    DeclaredPrecision,
-)
-from location_data.resolver.types import Binding, Grade, Position, cap_confidence
+from location_data.resolver.bind import LOW_CONFIDENCE_QUALIFIERS, REGISTRY_PIN_CONFLICT_M
+from location_data.resolver.types import Binding, Fill, Position, Verdict, cap_confidence
 
 # The v1 `location_uncertainty_policy` seeds (migrations 383 + 491), collapsed to one number
 # per LEVEL. UNCALIBRATED by design: these are geometric bounds, never `r95_empirical` —
@@ -42,42 +41,21 @@ RADIUS_M: dict[str, float] = {
     "unknown": 250_000.0,           # 383: the CZ-scale sentinel for a row with no position
 }
 
-# A portal's precision signal reaches the CONFIDENCE and nothing else (W18). It used to
-# reach the granularity too, through a `DECLARED_CAP` ladder, and that ladder is deleted
-# rather than merely bypassed: once the cap was restricted to a grain the PIN established —
-# BIND's R7/R8 rungs, whose grain is `obec`, plus the unbound `unknown` — every value in it
-# was at or coarser than the grain it could reach, so it changed no answer on any input.
-# Brute-forced over both reachable grains × every label × the blurred fallback: zero grains
-# move. A table that cannot change an output is a rail that reads as enforced and is not,
-# which is exactly the defect class this subsystem keeps paying for. What a declaration still
-# does is `confidence`, below: a blurred pin is a weak witness however good the bind is.
+# The row's keys, finest first: the first one FILL wrote names the grain.
+_GRAIN_KEYS: tuple[tuple[str, str], ...] = (
+    ("address_point", "ruian_adm_kod"), ("street", "ulice_kod"),
+    ("cast_obce_or_quarter", "cast_obce_kod"), ("obec", "obec_kod"), ("okres", "okres_kod"),
+    ("kraj", "kraj_kod"))
 
-def grade(
-    binding: Binding,
-    position: Position,
-    *,
-    declared: DeclaredPrecision,
-) -> Grade:
-    """**THE GRANULARITY IS THE BIND'S, FULL STOP** (W18). A portal's declared precision is a
-    statement about its own COORDINATE: it does not say the ad named no street, and it cannot
-    un-say what RÚIAN holds about the street the ad named — so it reaches the CONFIDENCE (a
-    blurred pin is a weak witness however good the bind is) and never the grain.
 
-    Two cuts of this rule were wrong before it came out. Keying it on the elected POSITION
-    inverted the two labels that were then capped but NOT blurred — idnes' `no_exact_address`
-    (66,165 listings) and sreality's `not_address` (13,176; both blur-declared by their
-    contracts since W1-c, so v5.9 covers them): a pin that AGREED with the bound
-    street stayed the position and was capped to `cast_obce_or_quarter` at 750 m, while a pin
-    that CONTRADICTED it lost to the street point and graded `street` at 300 m, so the
-    better-evidenced row graded coarser. Keying it on the PIN-DERIVED rungs instead was
-    correct and inert — their grain is already `obec` — so the table went with the rule.
-    """
-    granularity = binding.granularity if binding.bound else "unknown"
-    return Grade(
-        granularity=granularity,
-        match_confidence=confidence(binding, position, blurred=declared.blurred),
-        uncertainty_radius_m=radius_m(granularity, floor_m=position.extent_m),
-    )
+def grain_of(filled: Fill, verdict: Verdict) -> str:
+    """The row's grain is its finest key (W5): the ONE grain writer. A foreign row is `country`
+    where CHECK named the country, else `unknown`, as an undetermined one is."""
+    if verdict.country_status != "cz":
+        named = verdict.country_status == "foreign" and verdict.country_code
+        return "country" if named else "unknown"
+    return next((grain for grain, key in _GRAIN_KEYS if getattr(filled, key) is not None),
+                "unknown")
 
 
 def confidence(binding: Binding, position: Position, *, blurred: bool) -> str:

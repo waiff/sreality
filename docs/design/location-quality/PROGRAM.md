@@ -101,7 +101,7 @@ Each wave below replaces several local rules with one rule.
 | W2 | Resolve lane: one order, one trigger, one runtime | dirty_locations (CHECK 8→3, index swap, 13.2k no-op rows a day) | issue 9 | a workflow, a cron, a flag, 3 knobs and a sweep arm out; about 20 lines in | M |
 | W3 | Claim store: one current claim per fact | location_claims 14.77 M → about 5.95 M rows, −1 column, −2 indexes | cascade points; stale values | about −700 lines; 7 tie rules → 0; 4 supersession paths → 2 (the upsert and explicit retract) | L |
 | W4 | realitymix + remax contracts | none | issues 5, 6 | contract changes net negative, 1 regex in | S |
-| W5 | Resolver v5.10: one ladder, one matcher, one grain, one containment test | quarter field holds one level | issues 2, 3; cascade points | about 8 special cases out; about 15 lines plus one registry distance read and one match-key list in | M |
+| W5 | Resolver v5.10: one ladder, one matcher, one grain, one containment test | quarter field holds one level | issues 2, 3; cascade points | 6 special cases out; one match-key list and the shadow's `ids` block in (no distance read, Q3) | M |
 | W6 | Radius v5.11: CE95 for pins, reach for register placements | −declared_radius_m, −match_confidence, −sentinel | issue 4 | hand table and two fields out; generated table, script and one standing recalibration in | M |
 | W7 | RÚIAN loader: full partitions, read levels only | −2 levels, 23,626 units retired, −6 columns | Praha okres, mirror defects | negative | S |
 
@@ -212,30 +212,35 @@ The review found the same defect class on realitymix. 4 active rows (e.g. 101044
 - **As built 2026-10-31 (PR #2220, ticket #2219, gate #2222; contract only, no migration, no resolver bump):** realitymix@8's `rm.det.agency_est_flag` reads `div#map` alone (3,622 of the 3,656 rows declared today had both nodes blank; verified on 112 pages: fires on exactly the 46 hidden ones, moves no pin). The dead C6 `odbl` licence branch is deleted (−145/+120 outside fixtures). **remax v7 is NOT built: ruling Q8 (the header slot is not read).** Acceptance corrected to ≤ 110 outside (68 undeclared agency pins and 6 placeholders stay until W5), 0 declared outside, 0 off-grid declared, declared pinned rows inside 7.4k–19,527. Merge order: after W2 is live; rollout = `gh workflow run location_claims_intake.yml --ref main` by hand (~102k bodies, ~1 h); rollback entry-scoped (`--retract realitymix@8 --extractor-id rm.det.agency_est_flag`), never whole-version. The standing shadow gate runs through #2225 (wave shadow) before the re-mine.
 
 ### W5: resolver v5.10
-- **Quarter = část obce only.** MOMC, správní obvod and ZSJ stop being levels a row can be bound to.
-  - MOMC stays a match-key level that anchors its town. 1,432 remax listings (review) state their town as "Praha N", a MOMC name, and bind obec Praha only through it.
-  - So there are two lists: bindable part levels (část) and match-key levels (část, MOMC).
-  - Part claims use the town ladder's finest-first matcher.
-- **Grain = grain_of(keys).** CHECK stops writing grain.
-- **Street quarter:** a street keeps the claimed část when the street has doors there (+12,441 rows).
-- **Position:** one containment test for every pin, with the 250 m tolerance. CHECK no longer flags `pin_outside_obec` within that tolerance. The test needs one new registry read (distance to the bound obec) in the registry view, the SQL, the CI mini mirror and the drain's pre-answer.
-- **Determinism:** `ORDER BY u.code` makes the containing-obec query deterministic.
-- **KÚ fix:** the door rule answers the KÚ for an address point that has no coordinates.
-- **Consumers:**
-  - Labels lose "Praha 5, " or "Brno-střed, " on about 960 rows, in Browse and in the extension header.
-  - The location ad can change on properties whose ads change grain.
-  - Autodedup's split-city rule keeps an ad with a known quarter inside that quarter, so its candidates change for about 6k Praha rows that gain a quarter and about 2.1k MOMC-coded rows. The standing shadow gate applies.
-- **Acceptance:**
+**As built** (#2251; design and measurements: `w5-resolver-v5-10.md`). `RESOLVER_VERSION = "resolver:v5.10"`; W2's reconcile sweeps on deploy, no migration, no hand step.
+- **Position (Q3, one truth):** `bind.place`'s `may_place`. Where the words bound the row, a pin is its position only inside the bound obec's pip polygon (strict: no tolerance, so no registry distance read) and never when the portal declares an area marker (`AREA_MARKER_LABELS`: the `approximate_location` bazos already emits on all 52,185 active pins, so no contract bump). Without words (R7/R8) the pin names its town. v5.9's declared-blurred exception is deleted; CHECK keeps `pin_outside_obec` as evidence and loses its coarsening.
+- **Grain = `grade.grain_of(keys)`**, the one writer (`grade()`, `Grade`, `Binding.granularity`, `Verdict.granularity` and `coarser_of` deleted).
+- **Quarter = část obce only (Q1):** `MATCH_LEVELS = ("cast_obce", "momc")` and `composite.part_of` (a část itself, a KÚ the část its name spells, a MOMC nothing). MOMC stays a match key: the 1,607 remax "Praha N" rows still bind Praha. Správní obvod and ZSJ are no level. Part claims match like town names; a street keeps the claimed část when it has doors there (Q2).
+- **KÚ fix:** an address point with no coordinates takes its část's door KÚ (19405830).
+- **Determinism deferred:** the `ORDER BY` in `CONTAINING_OBEC_SQL` waits for the next re-render of the scorecard view (0 of 6,553 sampled pins lie on a shared border).
+- **Shadow:** the `ids` export block is built, so the about 5.4k Praha rows that gain a quarter are judged; dispatch per slice (`wave-shadow.md`).
+- **Consumers:** labels lose "Praha 5, " on about 935 rows and 1,899 gain their část; the location ad can change where an ad's grain changes; the bazos map "±" grows to the town's reach.
+- **Acceptance** (before: 2026-10-31 16Z):
 
 | Measure | Before | After |
 |---|---|---|
-| Grain differs from keys | about 745 after v5.9 | 0 |
-| Street rows without a část | 18,832 | ≤ 6,400 |
-| MOMC codes in cast_obce_kod | 2,855 | 0 |
+| `listing/{p}/outside` (strict, Q3) | 1,359 | register slivers only: bazos ≤ 6, ceskereality ≤ 3, bezrealitky ≤ 1 |
+| `served/{p}/outside` | 1,105 | the same residual |
+| Position is a pin outside the bound obec | 1,353 | 0 |
+| bazos words-bound rows on their pin | 23,297 | 0 |
+| Grain differs from the finest key | 736 | 0 |
+| MOMC codes in `cast_obce_kod` | 2,834 | 0 |
 | Wrong-MČ rows | 518 | 0 |
-| Outside cell (tolerant test) | about 1,342 non-bazos after v5.9 | 0 |
-| Praha with no quarter | 9,339 | ≤ 4,800 |
-| location_town_coverage | as before | no redder; the 1,432 remax "Praha N" rows still bind Praha by name |
+| Quarter grain with no část code (SO ties) | 200 | 0 |
+| Street rows without a část | 18,724 | ≤ 6,400 |
+| Praha with no quarter | 9,308 | ≤ 4,800 |
+| remax "Praha N" bound to Praha | 1,607 | 1,607 (about 1,600 with a část) |
+| `sreality/ku` | 1 | 0 |
+| `location_town_coverage` | W1 reading | no redder |
+| `disputed/pin_outside_obec` | design §0 | about the same (evidence stays) |
+| Shadow gate | — | PASS on every slice |
+
+Residual, named: about 10 register-point slivers (not pins) and about 300 ceskereality ads with only a pin (R7: the pin names the town, the words cannot judge it).
 
 ### W6: one honest radius (v5.11)
 Today the 1 km obec constant contains the truth 82 % of the time: 29 % for bazos, 100 % for remax.
@@ -288,7 +293,7 @@ Today the 1 km obec constant contains the truth 82 % of the time: 29 % for bazos
 - **Rejected:** a cross-portal placeholder-pin list. idnes' two Brno placeholder points lie inside Brno, so the containment rule cannot replace them and they stay contract-local.
 
 ## Not covered (named, not built)
-- **Qualifier scoring:** an obec R4 with two qualifiers (55) beats a claimed part R4 (50). This is unmeasured. W5's one matcher may change it, so measure it before W5 or defer it explicitly.
+- **Qualifier scoring:** an obec R4 with two qualifiers (55) beats a claimed part R4 (50). This is unmeasured. **Deferred explicitly by W5** (2026-10-31): v5.10 changes no score (design § 10).
 - **KÚ below address grain:** 162,791 obec-grain and 54,379 street-grain rows have no KÚ (all rows). W1 shows coverage by grain. Most of the gap is structural: multi-KÚ streets and towns. W5's část lending closes it where a část lies in one KÚ.
 - **Issue 2 residue:** 10,408 town-only rows on the obec point (idnes 9,352) are structural, because the source withholds finer location. The row already says so honestly (obec grain, open ring, reach radius). No action.
 

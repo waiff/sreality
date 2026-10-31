@@ -197,7 +197,8 @@ jobs:
       # W3 one claim write (what it changes, keeps and retracts is an executed answer).
       # test_map_overlays_live joins because migration 600's tile renderer is plpgsql: its
       # PostGIS calls resolve only when it runs, and only real tiles show the layers it writes.
-      # test_connect_read_only_live joins because the wave shadow's "no write" is the server's refusal.
+      # test_connect_read_only_live joins because the wave shadow's "no write" is the server's refusal;
+      # test_shadow_ties_live because which rulings tie a mover to the ids block is an executed answer.
       - name: PREPARE every SQL statement against the replayed schema
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
@@ -210,6 +211,7 @@ jobs:
                  tests/location_data/test_registry_publish_live.py \
                  tests/test_map_overlays_live.py \
                  tests/scraper/test_connect_read_only_live.py \
+                 tests/autodedup/test_shadow_ties_live.py \
                  tests/toolkit/test_dedup_candidates_sql.py -q
 
       - name: Tenant-isolation sweep (RLS cross-tenant denial, Phase 1)
